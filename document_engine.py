@@ -677,6 +677,4 @@ def query_documents(user_input: str, include_sources: bool = False):
     return final_answer
 
 if __name__ == "__main__":
-    # with open("document_engine_diagram.png", "wb") as binary_file:
-    #     binary_file.write(app.get_graph().draw_mermaid_png())
     query_documents("Who is best friends with Dagbert?", True)
