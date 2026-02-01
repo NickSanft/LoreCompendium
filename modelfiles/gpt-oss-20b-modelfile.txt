@@ -1,0 +1,3 @@
+# Modelfile
+FROM gpt-oss:20b
+PARAMETER num_ctx 32768
