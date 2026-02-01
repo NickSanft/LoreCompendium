@@ -676,5 +676,6 @@ def query_documents(user_input: str, include_sources: bool = False):
         }
     return final_answer
 
+
 if __name__ == "__main__":
     query_documents("Who is best friends with Dagbert?", True)
