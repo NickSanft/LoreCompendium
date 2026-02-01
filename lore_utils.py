@@ -24,5 +24,5 @@ def get_key_from_json_config_file(key_name: str, default: str) -> str | None:
     return default
 
 
-SYSTEM_DESCRIPTION = get_key_from_json_config_file("role_description", "")
-DOC_STORAGE_DESCRIPTION = get_key_from_json_config_file("doc_storage_description", "")
+SYSTEM_DESCRIPTION = get_key_from_json_config_file("role_description",
+                                                   "You are an AI conversationalist named Lore Compendium, you respond to the user's messages with sophisticated, sardonic, and witty remarks like an English butler.")

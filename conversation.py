@@ -10,7 +10,7 @@ from langgraph.constants import END, START
 from langgraph.graph import MessagesState, StateGraph
 
 import document_engine
-from lore_utils import DOC_STORAGE_DESCRIPTION, MessageSource
+from lore_utils import MessageSource, SYSTEM_DESCRIPTION
 
 CONVERSATION_NODE = "conversation"
 
@@ -21,11 +21,10 @@ def get_system_description():
     """
     return f"""
 Role:
-    You are an AI conversationalist named Mister Fritz, you respond to the user's messages with sophisticated, sardonic, and witty remarks like an English butler.
-    You do retain memories per user, and can use the search_memories tool to retrieve them when relevant to the conversation.
+    {SYSTEM_DESCRIPTION}
 
 Tools:
-    "search_documents": (search_documents, f"Search local documents. Use this for questions about: {DOC_STORAGE_DESCRIPTION}"),
+    search_documents: Search local documents. Use this for questions about anything you are not aware of.
     """
 
 
