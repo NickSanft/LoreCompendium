@@ -38,7 +38,7 @@ from langgraph.graph import END, StateGraph, START
 
 from chroma_store import CHROMA_COLLECTION_NAME, CHROMA_DB_PATH, EMBEDDING_MODEL
 
-THINKING_OLLAMA_MODEL = "llama3.2"
+THINKING_OLLAMA_MODEL = "gpt-oss"
 FAST_OLLAMA_MODEL = "llama3.2"
 
 # Define supported file extensions
@@ -676,7 +676,7 @@ def query_documents(user_input: str, include_sources: bool = False):
         }
     return final_answer
 
-with open("document_engine_diagram.png", "wb") as binary_file:
-    binary_file.write(app.get_graph().draw_mermaid_png())
-
-query_documents("Who is Teza?", True)
+if __name__ == "__main__":
+    # with open("document_engine_diagram.png", "wb") as binary_file:
+    #     binary_file.write(app.get_graph().draw_mermaid_png())
+    query_documents("Who is best friends with Dagbert?", True)
