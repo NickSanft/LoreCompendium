@@ -1,18 +1,14 @@
 import os
-import sys
 import time
 import queue
 import threading
 import json
-import logging
 from typing import List, Optional
-import io
 import msoffcrypto
 import openpyxl
 
 # Concurrency imports
 import concurrent.futures
-import multiprocessing
 
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -45,98 +41,16 @@ FAST_OLLAMA_MODEL = "llama3.2"
 SUPPORTED_EXTENSIONS = ('.docx', '.pdf', '.xlsx', '.csv', '.txt', '.md')
 DOC_FOLDER = "./input"
 
-# --- GLOBAL VARS ---
-# Changed from GLOBAL_RETRIEVER to GLOBAL_VECTORSTORE to allow add/delete operations
 GLOBAL_VECTORSTORE: Optional[Chroma] = None
 INGESTION_QUEUE = queue.Queue()
 MANIFEST_LOCK = threading.Lock()
 INDEXED_FILES_PATH = os.path.join(CHROMA_DB_PATH, "indexed_files.txt")
 
-# --- OCR SETUP ---
-try:
-    from PIL import Image
-    import easyocr
 
-    OCR_AVAILABLE = True
-except ImportError:
-    OCR_AVAILABLE = False
-    print("EasyOCR not installed. OCR fallback unavailable.")
-
-try:
-    import fitz  # PyMuPDF
-
-    PYMUPDF_AVAILABLE = True
-except ImportError:
-    PYMUPDF_AVAILABLE = False
-    print("PyMuPDF not installed. Cannot render PDF pages for OCR.")
-
-
-def get_ocr_reader():
-    """Lazy loader for EasyOCR to ensure it works in subprocesses."""
-    if OCR_AVAILABLE:
-        # gpu=False is safer for multiprocessing to avoid CUDA context conflicts
-        return easyocr.Reader(['en'], gpu=False)
-    return None
-
-
-# --- DOCUMENT LOADING FUNCTIONS ---
-
-def load_pdf_with_ocr_fallback(file_path: str) -> List[Document]:
-    """
-    Loads a PDF file. First tries PyPDFLoader for embedded text.
-    If text is empty or too short, falls back to OCR.
-    """
-    try:
-        # Try standard PDF loading first
-        loader = PyPDFLoader(file_path)
-        docs = loader.load()
-
-        # Check if we got meaningful text
-        total_text = "".join([doc.page_content for doc in docs]).strip()
-        if len(total_text) > 50:
-            return docs
-
-        # Fall back to OCR
-        if not OCR_AVAILABLE or not PYMUPDF_AVAILABLE:
-            return docs
-
-        # Initialize reader locally for this process
-        reader = get_ocr_reader()
-        if not reader:
-            return docs
-
-        pdf_document = fitz.open(file_path)
-        ocr_docs = []
-
-        for page_num in range(len(pdf_document)):
-            page = pdf_document[page_num]
-            # 2x zoom for better OCR
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-
-            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            img_byte_arr = io.BytesIO()
-            img.save(img_byte_arr, format='PNG')
-            img_byte_arr = img_byte_arr.getvalue()
-
-            result = reader.readtext(img_byte_arr, detail=0)
-            text = "\n".join(result)
-
-            doc = Document(
-                page_content=text,
-                metadata={
-                    "source": file_path,
-                    "page": page_num,
-                    "extraction_method": "ocr_easyocr"
-                }
-            )
-            ocr_docs.append(doc)
-
-        pdf_document.close()
-        return ocr_docs
-
-    except Exception as e:
-        print("Error processing PDF %s: %s", file_path, e)
-        return []
+def load_pdf(file_path: str) -> List[Document]:
+    loader = PyPDFLoader(file_path)
+    docs = loader.load()
+    return docs
 
 
 def load_document_by_extension(file_path: str) -> List[Document]:
@@ -151,7 +65,7 @@ def load_document_by_extension(file_path: str) -> List[Document]:
     ext = os.path.splitext(file_path)[1].lower()
     try:
         if ext == '.pdf':
-            return load_pdf_with_ocr_fallback(file_path)
+            return load_pdf(file_path)
         elif ext == '.docx':
             loader = UnstructuredWordDocumentLoader(file_path)
             return loader.load()
@@ -632,7 +546,6 @@ def query_documents(user_input: str, include_sources: bool = False):
 
     # Run the graph
     config = {"recursion_limit": 25}
-    # Ensure DB is initialized before first query
     if GLOBAL_VECTORSTORE is None:
         initialize_vectorstore()
 
