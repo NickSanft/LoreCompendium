@@ -1,8 +1,10 @@
 # Lore Compendium - Discord AI Chatbot
 
 Lore Compendium is an AI-powered Discord bot that can provide conversational responses with document retrieval.
-The primary purpose is to provide anyone with their own documents (lore, books, etc) and be able to semantically seacrch
+The primary purpose is to provide anyone with their own documents (lore, books, etc) and be able to semantically search
 them.
+
+Currently, this supports .docx, .pdf, .xlsx, .csv, .txt, and .md file formats. This does NOT support PDFs without embedded text.
 
 ## Features
 
