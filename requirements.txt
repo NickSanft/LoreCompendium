@@ -8,3 +8,7 @@ watchdog~=6.0.0
 pydantic~=2.12.5
 langchain-community~=0.4.1
 langchain-text-splitters~=1.1.0
+
+langchain-chroma
+langchain-ollama
+typing-extensions
