@@ -13,7 +13,7 @@ client = commands.Bot(command_prefix=command_prefix, intents=intents)
 
 @client.event
 async def on_ready():
-    print("Logged in as %s", client.user)
+    print("Logged in as ", client.user)
 
 
 @client.command()
@@ -22,17 +22,7 @@ async def lore(ctx, *, message):
     original_message = await ctx.send(
         "This may take a few seconds, please wait. This message will be updated with the result!")
     original_response = query_documents(message)
-    resp_len = len(original_response)
-    author = ctx.author.name
-
-    if resp_len > 2000:
-        response = "The answer was over 2000 ({}), so you're getting multiple messages {} \r\n".format(resp_len,
-                                                                                                       author) + original_response
-        responses = split_into_chunks(response)
-        for i, response in enumerate(responses):
-            await ctx.send(response)
-    else:
-        await original_message.edit(content=original_response)
+    await chunk_and_send(ctx, original_message, original_response)
 
 
 @client.event
@@ -51,6 +41,10 @@ async def on_message(ctx):
     original_message = await ctx.channel.send(
         "This may take a few seconds, please wait. This message will be updated with the result!")
     original_response = ask_stuff(message_clean, author, MessageSource.DISCORD_TEXT)
+    await chunk_and_send(ctx, original_message, original_response)
+
+
+async def chunk_and_send(ctx, original_message, original_response):
     resp_len = len(original_response)
     author = ctx.author.name
 
