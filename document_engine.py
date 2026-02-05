@@ -33,9 +33,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import END, StateGraph, START
 
 from chroma_store import CHROMA_COLLECTION_NAME, CHROMA_DB_PATH, EMBEDDING_MODEL
-
-THINKING_OLLAMA_MODEL = "gpt-oss"
-FAST_OLLAMA_MODEL = "llama3.2"
+from lore_utils import THINKING_OLLAMA_MODEL, FAST_OLLAMA_MODEL
 
 # Define supported file extensions
 SUPPORTED_EXTENSIONS = ('.docx', '.pdf', '.xlsx', '.csv', '.txt', '.md')
@@ -83,8 +81,6 @@ def load_document_by_extension(file_path: str) -> List[Document]:
         print("Error loading %s: %s", file_path, e)
         return []
 
-
-# --- LIVE SYNC INFRASTRUCTURE ---
 
 class DocumentEventHandler(FileSystemEventHandler):
     """

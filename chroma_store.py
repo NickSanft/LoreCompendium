@@ -7,10 +7,10 @@ from langchain_core.stores import BaseStore
 from langchain_ollama import OllamaEmbeddings
 from typing_extensions import Literal
 
+from lore_utils import EMBEDDING_MODEL
+
 CHROMA_DB_PATH = "./chroma_store"  # Where the vector DB will be saved
 CHROMA_COLLECTION_NAME = "word_docs_rag"
-EMBEDDING_MODEL = "mxbai-embed-large"
-
 
 embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL)
 
