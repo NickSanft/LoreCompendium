@@ -36,7 +36,6 @@ class ChromaStore(BaseStore[str, Union[str, bytes]]):
         self.collection_name = collection_name
         self.persist_directory = persist_directory
 
-        # Initialize the Chroma vector store
         self.vectorstore = Chroma(
             collection_name=collection_name,
             embedding_function=embeddings,
@@ -45,12 +44,9 @@ class ChromaStore(BaseStore[str, Union[str, bytes]]):
 
     def get(self, key: str) -> Optional[Dict[str, Any]]:
         """Retrieve a value by key."""
-        # Chroma get returns a dictionary with lists of results
         result = self.vectorstore.get(ids=[key], include=["metadatas"])
 
         if result and result['metadatas']:
-            # Return the first match's metadata (reconstructed to original dict)
-            # We strip internal metadata keys if necessary, but here we return full metadata
             return result['metadatas'][0]
         return None
 
@@ -61,7 +57,6 @@ class ChromaStore(BaseStore[str, Union[str, bytes]]):
 
         result = self.vectorstore.get(ids=keys, include=["metadatas"])
 
-        # Create a map for O(1) lookup to ensure order matches input 'keys'
         found_map = {}
         if result and result['ids']:
             for id_str, metadata in zip(result['ids'], result['metadatas']):
@@ -93,14 +88,10 @@ class ChromaStore(BaseStore[str, Union[str, bytes]]):
         ids = []
 
         for namespace_str, key, value in key_value_pairs:
-            # 1. Prepare Metadata
-            # We enforce the namespace and original key into metadata for filtering later
             metadata = value.copy()
             metadata["namespace"] = namespace_str
             metadata["original_key"] = key
 
-            # 2. Determine Content for Embedding
-            # Prefer specific keys for semantic meaning, fallback to JSON dump
             if "page_content" in value:
                 content = str(value["page_content"])
             elif "text" in value:
@@ -114,7 +105,6 @@ class ChromaStore(BaseStore[str, Union[str, bytes]]):
             documents.append(doc)
             ids.append(key)
 
-        # Add to Chroma (upsert logic handles replacements based on ID)
         if documents:
             self.vectorstore.add_documents(documents=documents, ids=ids)
 
@@ -164,11 +154,6 @@ class ChromaStore(BaseStore[str, Union[str, bytes]]):
 
         output = []
         for doc in results:
-            # We use the ID stored in Chroma (which we set as the key)
-            # However, doc object usually doesn't expose ID directly in simple search
-            # unless we use similarity_search_with_score or custom retrieval.
-            # Fortunately, we stored 'original_key' in metadata.
-
             key = doc.metadata.get("original_key")
             output.append((key, doc.metadata))
 
