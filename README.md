@@ -1,165 +1,138 @@
 # Lore Compendium - Discord AI Chatbot
 
-Lore Compendium is an AI-powered Discord bot that can provide conversational responses with document retrieval.
-The primary purpose is to provide anyone with their own documents (lore, books, etc) and be able to semantically search
-them.
+Lore Compendium is an AI-powered Discord bot that can answer questions about your documents! Whether you have lore books, PDFs, Word documents, or spreadsheets, this bot will search through them and provide intelligent answers.
 
-Currently, this supports .docx, .pdf, .xlsx, .csv, .txt, and .md file formats. This does NOT support PDFs without embedded text.
+**Supported file formats:** .docx, .pdf, .xlsx, .csv, .txt, .md
+
+---
+
+## 🚀 Quick Start (For Beginners)
+
+**Don't know how to code? No problem!** Follow these simple steps:
+
+### Step 1: Install Requirements
+You need two programs installed on your computer:
+- **Python 3.13** - Download from [python.org](https://www.python.org/downloads/)
+  - ✅ On Windows: Check "Add Python to PATH" during installation!
+- **Ollama** - Download from [ollama.com](https://ollama.com/download)
+  - Windows: Run the installer
+  - Mac: Use `brew install ollama` or download from website
+  - Linux: Run `curl -fsSL https://ollama.com/install.sh | sh`
+
+### Step 2: Get a Discord Bot Token
+1. Go to [Discord Developer Portal](https://discord.com/developers/applications)
+2. Click "New Application" and give it a name
+3. Go to the "Bot" section
+4. Click "Reset Token" and copy the token (you'll need this later!)
+5. Enable "Message Content Intent" under Privileged Gateway Intents
+6. Go to OAuth2 → URL Generator, select "bot", then select permissions and invite to your server
+
+### Step 3: Run Setup
+**Windows:** Double-click `setup.bat`
+**Mac/Linux:** Open Terminal in this folder and run `./setup.sh`
+
+The setup will:
+- Install all needed software libraries
+- Download AI models (may take 10-20 minutes)
+- Guide you through configuration
+
+### Step 4: Add Your Documents
+Put your documents (PDFs, Word docs, etc.) in the `input` folder.
+
+### Step 5: Start the Bot!
+**Windows:** Double-click `start.bat`
+**Mac/Linux:** Run `./start.sh`
+
+That's it! Your bot is now running. Go to Discord and message it!
+
+📖 **Need more help?** See [BEGINNER_GUIDE.md](BEGINNER_GUIDE.md) for detailed instructions.
+
+---
 
 ## Features
 
-- **Conversational AI**: Witty, butler-like responses powered by local LLM models via Ollama
-- **Document Search**: RAG (Retrieval-Augmented Generation) system for querying local documents (Word docs & PDFs)
+- **Conversational AI**: Customizable personality powered by local LLM models via Ollama
+- **Document Search**: RAG (Retrieval-Augmented Generation) system for querying local documents
 - **Discord Commands**:
     - `$lore <query>` - Search local documents
-- Direct messages or mentions trigger conversational responses that can use any of the below tools. You can also upload
-  a voice message using Discord mobile as well.
-- **Tools**: Dice rolling, current time lookup, web search, document search, memory retrieval, image generation, and
-  image recognition (limited to one attachment per message)
+    - Direct messages or mentions trigger conversational responses
+- **Live Document Sync**: Automatically detects when you add/change documents
+- **Privacy First**: Everything runs locally on your computer - no cloud services needed!
 
 ## Architecture
 
 The bot uses a LangGraph-based agent system with:
 
 - **Conversation Node**: Handles user queries with tool access
-- **ChromaDB**: Stores user memories and document embeddings
+- **ChromaDB**: Stores document embeddings for fast semantic search
+- **Ollama**: Provides local AI models
 
 Document Engine Diagram:
 
 ![Document Engine Diagram](document_engine_diagram.png)
 
-## Prerequisites
+---
 
-### 1. Install Python
+## Advanced Setup (For Developers)
 
-- Python 3.13 is recommended
-- Download from [python.org](https://www.python.org/downloads/)
+If you prefer manual installation or want to customize the setup:
 
-### 2. Install Ollama
+### Prerequisites
 
-**Windows:**
+1. **Python 3.13** - [python.org](https://www.python.org/downloads/)
+2. **Ollama** - [ollama.com](https://ollama.com/download)
 
-1. Download the Ollama installer from [ollama.com](https://ollama.com/download/windows)
-2. Run the installer and follow the prompts
-3. Ollama will run as a background service
-
-**macOS:**
-
-```bash
-# Using Homebrew
-brew install ollama
-
-# Or download from ollama.com/download/mac
-```
-
-**Linux:**
-
-```bash
-curl -fsSL https://ollama.com/install.sh | sh
-```
-
-### 3. Pull Required Ollama Models
-
-After installing Ollama, pull the models used by Mister Fritz:
-
-Windows:
-
-Run ./modelfiles/run.bat
-
-Linux/macOS:
-
-```bash
-ollama create -f .\gpt-oss-20b-modelfile.txt gpt-oss
-ollama create -f .\llama3.2-modelfile.txt llama3.2
-
-ollama run gpt-oss /bye
-ollama run llama3.2 /bye
-
-ollama pull mxbai-embed-large
-```
-
-## Installation
+### Manual Installation Steps
 
 1. **Clone the repository:**
-
 ```bash
 git clone <repository-url>
 cd LoreCompendium
 ```
 
-2. **Create a virtual environment:**
-
+2. **Create and activate virtual environment:**
 ```bash
+# Create venv
 python -m venv .venv
-```
 
-3. **Activate the virtual environment OR install with pip:**
-
-Virtual environment:
-
-Windows:
-
-```bash
+# Activate - Windows
 .venv\Scripts\activate
-```
 
-macOS/Linux:
-
-```bash
+# Activate - Mac/Linux
 source .venv/bin/activate
 ```
 
-Pip installation:
-
+3. **Install dependencies:**
 ```bash
 pip install -r requirements.txt
 ```
 
-4. **Configure the bot:**
+4. **Download Ollama models:**
+```bash
+cd modelfiles
+ollama create -f gpt-oss-20b-modelfile.txt gpt-oss
+ollama create -f llama3.2-modelfile.txt llama3.2
+ollama pull mxbai-embed-large
+cd ..
+```
 
-Create a `config.json` file in the project root with the following structure:
-
+5. **Create config.json:**
 ```json
 {
-  "discord_bot_token": "Your Discord bot token",
-  "role_description": "How you want the conversational agent to behave (by default, an english butler)",
-  "thinking_ollama_model": "The Ollama model to use for thinking (by default, gpt-oss)",
-  "fast_ollama_model": "The Ollama model to use for fast responses (by default, llama3.2)"
+  "discord_bot_token": "your_token_here",
+  "role_description": "Bot personality description",
+  "thinking_ollama_model": "gpt-oss",
+  "fast_ollama_model": "llama3.2",
+  "embedding_model": "mxbai-embed-large"
 }
 ```
 
-To get a Discord bot token:
+6. **Add documents to `input/` folder**
 
-1. Go to [Discord Developer Portal](https://discord.com/developers/applications)
-2. Create a new application
-3. Go to the "Bot" section
-4. Click "Reset Token" to generate a token
-5. Enable "Message Content Intent" under Privileged Gateway Intents
-6. Invite the bot to your server using the OAuth2 URL generator
-
-6. **Set up document folder (optional):**
-
-Add your own documents in the `input/` folder. By default, there is a sample file that you can use to test.
-
-## Running the Bot
-
-1. **Start Ollama** (if not already running):
-
+7. **Run the bot:**
 ```bash
-ollama serve
+python discord_main.py
 ```
-
-2. **Run the Discord bot:**
-
-```bash
-python main_discord.py
-```
-
-The bot will:
-
-- Connect to Discord
-- Initialize the vector store for document search
-- Begin responding to messages and commands
 
 ## License
 
