@@ -121,8 +121,10 @@ Create a `config.json` file in the project root with the following structure:
 
 ```json
 {
-  "discord_bot_token": "YOUR_DISCORD_BOT_TOKEN",
-  "role_description": "How you want the conversational agent to behave (by default, an english butler)"
+  "discord_bot_token": "Your Discord bot token",
+  "role_description": "How you want the conversational agent to behave (by default, an english butler)",
+  "thinking_ollama_model": "The Ollama model to use for thinking (by default, gpt-oss)",
+  "fast_ollama_model": "The Ollama model to use for fast responses (by default, llama3.2)"
 }
 ```
 
