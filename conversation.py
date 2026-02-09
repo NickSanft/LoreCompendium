@@ -10,7 +10,7 @@ from langgraph.constants import END, START
 from langgraph.graph import MessagesState, StateGraph
 
 import document_engine
-from lore_utils import MessageSource, SYSTEM_DESCRIPTION
+from lore_utils import MessageSource, SYSTEM_DESCRIPTION, THINKING_OLLAMA_MODEL
 
 CONVERSATION_NODE = "conversation"
 
@@ -58,11 +58,9 @@ def conversation(state: MessagesState, config: RunnableConfig):
     messages = state["messages"]
     latest_message = messages[-1].content if messages else ""
     print("Latest message: %s", latest_message)
-    # Use cached system prompt instead of rebuilding
     inputs = {"messages": [("system", get_system_description()),
                            ("user", latest_message)]}
 
-    # Stream and collect the response
     final_state = None
 
     for s in conversation_react_agent.stream(inputs, config=get_config_values(config), stream_mode="values"):
@@ -71,11 +69,9 @@ def conversation(state: MessagesState, config: RunnableConfig):
         # Check for tool calls in the latest message
         if "messages" in s and s["messages"]:
             latest = s["messages"][-1]
-            # Check if this is an AI message with tool calls
             if hasattr(latest, 'tool_calls') and latest.tool_calls:
                 print("Detected tool calls: %s", [tc.get('name', '') for tc in latest.tool_calls])
 
-    # Extract text response
     resp = final_state["messages"][-1].content if final_state and "messages" in final_state else ""
     return {'messages': [resp]}
 
@@ -100,13 +96,6 @@ def format_prompt(prompt: str, source: MessageSource, user_id: str) -> str:
 
 
 def ask_stuff(base_prompt: str, user_id: str, source: MessageSource) -> dict:
-    """Process user input and return structured output with text and attachments.
-
-    Args:
-        base_prompt: The user's message/question
-        source: The messaging platform source
-        user_id: The user's identifier
-    """
     user_id_clean = re.sub(r'[^a-zA-Z0-9]', '', user_id)  # Clean special characters
     full_prompt = format_prompt(base_prompt, source, user_id_clean)
 
@@ -123,7 +112,6 @@ def ask_stuff(base_prompt: str, user_id: str, source: MessageSource) -> dict:
     final_state = None
     for s in app.stream(inputs, config=config, stream_mode="values"):
         final_state = s
-        # Still print messages for backwards compatibility
         message = s["messages"][-1] if "messages" in s and s["messages"] else None
         if message:
             if isinstance(message, tuple):
@@ -131,7 +119,6 @@ def ask_stuff(base_prompt: str, user_id: str, source: MessageSource) -> dict:
             elif hasattr(message, 'pretty_print'):
                 message.pretty_print()
 
-    # Extract structured output
     final_text = ""
     if final_state and "messages" in final_state and final_state["messages"]:
         last_msg = final_state["messages"][-1]
@@ -140,7 +127,7 @@ def ask_stuff(base_prompt: str, user_id: str, source: MessageSource) -> dict:
     return final_text
 
 
-ollama_instance = ChatOllama(model=document_engine.THINKING_OLLAMA_MODEL)
+ollama_instance = ChatOllama(model=THINKING_OLLAMA_MODEL)
 conversation_tools = [search_documents]
 conversation_react_agent = create_agent(ollama_instance, tools=conversation_tools)
 
