@@ -19,8 +19,7 @@ async def on_ready():
 @client.command()
 async def lore(ctx, *, message):
     print("Lore request: %s", message)
-    original_message = await ctx.send(
-        "This may take a few seconds, please wait. This message will be updated with the result!")
+    original_message = await ctx.send("This may take a bit, please wait. This message will be updated with the result!")
     original_response = query_documents(message)
     await chunk_and_send(ctx, original_message, original_response)
 

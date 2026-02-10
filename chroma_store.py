@@ -14,6 +14,7 @@ CHROMA_COLLECTION_NAME = "word_docs_rag"
 
 embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL)
 
+
 class ChromaStore(BaseStore[str, Union[str, bytes]]):
     """
     A vector-store backed implementation of a Key-Value store using ChromaDB.
