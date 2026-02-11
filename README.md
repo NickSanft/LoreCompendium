@@ -54,7 +54,7 @@ That's it! Your bot is now running. Go to Discord and message it!
 - **Conversational AI**: Customizable personality powered by local LLM models via Ollama
 - **Document Search**: RAG (Retrieval-Augmented Generation) system for querying local documents
 - **Discord Commands**:
-    - `$lore <query>` - Search local documents
+    - `/lore <query>` - Search local documents
     - Direct messages or mentions trigger conversational responses
 - **Live Document Sync**: Automatically detects when you add/change documents
 - **Privacy First**: Everything runs locally on your computer - no cloud services needed!

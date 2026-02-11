@@ -38,14 +38,6 @@ async def lore_slash(interaction: discord.Interaction, query: str):
     # Reuse the chunking logic, passing the interaction object
     await chunk_and_send(ctx=None, original_message=None, original_response=response, interaction=interaction)
 
-@client.command()
-async def lore(ctx, *, message):
-    print("Lore request: %s", message)
-    original_message = await ctx.send("This may take a bit, please wait. This message will be updated with the result!")
-    original_response = query_documents(message)
-    await chunk_and_send(ctx, original_message, original_response)
-
-
 @client.event
 async def on_message(ctx):
     author = ctx.author.name
