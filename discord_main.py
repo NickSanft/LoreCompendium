@@ -27,15 +27,8 @@ async def on_ready():
 @app_commands.describe(query="The question you want to ask about your lore")
 async def lore_slash(interaction: discord.Interaction, query: str):
     print(f"Slash Lore request: {query}")
-
-    # "Defer" tells Discord we are working on it (shows "Bot is thinking...")
-    # This prevents the command from timing out if the LLM is slow.
     await interaction.response.defer(thinking=True)
-
-    # Run the actual query
     response = query_documents(query)
-
-    # Reuse the chunking logic, passing the interaction object
     await chunk_and_send(ctx=None, original_message=None, original_response=response, interaction=interaction)
 
 @client.event
