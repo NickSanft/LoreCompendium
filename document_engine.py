@@ -4,8 +4,10 @@ import queue
 import threading
 import json
 from typing import List, Optional
-import msoffcrypto
-import openpyxl
+import msoffcrypto # noqa
+import openpyxl # noqa
+import unstructured # noqa
+import docx # noqa
 
 # Concurrency imports
 import concurrent.futures
