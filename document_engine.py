@@ -33,11 +33,9 @@ from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import END, StateGraph, START
 
 from chroma_store import CHROMA_COLLECTION_NAME, CHROMA_DB_PATH
-from lore_utils import THINKING_OLLAMA_MODEL, FAST_OLLAMA_MODEL, EMBEDDING_MODEL
+from lore_utils import THINKING_OLLAMA_MODEL, FAST_OLLAMA_MODEL, EMBEDDING_MODEL, SUPPORTED_EXTENSIONS, DOC_FOLDER
 
 # Define supported file extensions
-SUPPORTED_EXTENSIONS = ('.docx', '.pdf', '.xlsx', '.csv', '.txt', '.md')
-DOC_FOLDER = "./input"
 
 GLOBAL_VECTORSTORE: Optional[Chroma] = None
 INGESTION_QUEUE = queue.Queue()

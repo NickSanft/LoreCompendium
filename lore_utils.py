@@ -31,3 +31,5 @@ SYSTEM_DESCRIPTION = get_key_from_json_config_file("role_description",
 THINKING_OLLAMA_MODEL = get_key_from_json_config_file("thinking_ollama_model", "gpt-oss")
 FAST_OLLAMA_MODEL = get_key_from_json_config_file("fast_ollama_model", "llama3.2")
 EMBEDDING_MODEL = get_key_from_json_config_file("embedding_model", "mxbai-embed-large")
+SUPPORTED_EXTENSIONS = ('.docx', '.pdf', '.xlsx', '.csv', '.txt', '.md')
+DOC_FOLDER = "./input"
