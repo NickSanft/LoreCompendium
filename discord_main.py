@@ -64,12 +64,7 @@ async def on_message(message: discord.Message):
                 f"📥 **Received!** Saved {saved_count} document(s) to the `input` folder.\n*If you have live-sync enabled, these will be indexed shortly.*")
             return
 
-    # 3. Handle Command Prefix ($lore)
-    if message.content.startswith(command_prefix):
-        await client.process_commands(message)
-        return
-
-    # 4. Handle Conversational/DM Logic
+    # 3. Handle Conversational/DM Logic
     channel_type = message.channel
     is_dm = isinstance(channel_type, discord.DMChannel)
     is_mention = client.user.mentioned_in(message)
