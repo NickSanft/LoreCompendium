@@ -4,10 +4,10 @@ import queue
 import threading
 import json
 from typing import List, Optional
-import msoffcrypto # noqa
-import openpyxl # noqa
-import unstructured # noqa
-import docx # noqa
+import msoffcrypto  # noqa
+import openpyxl  # noqa
+import unstructured  # noqa
+import docx  # noqa
 
 # Concurrency imports
 import concurrent.futures
@@ -78,7 +78,7 @@ def load_document_by_extension(file_path: str) -> List[Document]:
             return loader.load()
         return []
     except Exception as e:
-        print("Error loading %s: %s", file_path, e)
+        print(f"Error loading {file_path}: {e}")
         return []
 
 
@@ -90,26 +90,26 @@ class DocumentEventHandler(FileSystemEventHandler):
 
     def on_created(self, event):
         if not event.is_directory and event.src_path.lower().endswith(SUPPORTED_EXTENSIONS):
-            print("[WATCHER] File Created: %s", event.src_path)
+            print(f"[WATCHER] File Created: {event.src_path}")
             INGESTION_QUEUE.put(("add", event.src_path))
 
     def on_modified(self, event):
         if not event.is_directory and event.src_path.lower().endswith(SUPPORTED_EXTENSIONS):
-            print("[WATCHER] File Modified: %s", event.src_path)
+            print(f"[WATCHER] File Modified: {event.src_path}")
             INGESTION_QUEUE.put(("update", event.src_path))
 
     def on_deleted(self, event):
         if not event.is_directory and event.src_path.lower().endswith(SUPPORTED_EXTENSIONS):
-            print("[WATCHER] File Deleted: %s", event.src_path)
+            print(f"[WATCHER] File Deleted: {event.src_path}")
             INGESTION_QUEUE.put(("delete", event.src_path))
 
     def on_moved(self, event):
         if not event.is_directory:
             if event.src_path.lower().endswith(SUPPORTED_EXTENSIONS):
-                print("[WATCHER] File Moved (Delete old): %s", event.src_path)
+                print(f"[WATCHER] File Moved (Delete old): {event.src_path}")
                 INGESTION_QUEUE.put(("delete", event.src_path))
             if event.dest_path.lower().endswith(SUPPORTED_EXTENSIONS):
-                print("[WATCHER] File Moved (Add new): %s", event.dest_path)
+                print(f"[WATCHER] File Moved (Add new): {event.dest_path}")
                 INGESTION_QUEUE.put(("add", event.dest_path))
 
 
@@ -133,7 +133,7 @@ def _load_index_manifest() -> dict:
         # Backward compatibility with legacy newline list
         return {line.strip(): {} for line in raw.splitlines() if line.strip()}
     except Exception as e:
-        print("Error reading index manifest: %s", e)
+        print(f"Error reading index manifest: {e}")
         return {}
 
 
@@ -142,7 +142,7 @@ def _write_index_manifest(manifest: dict) -> None:
         with open(INDEXED_FILES_PATH, "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2)
     except Exception as e:
-        print("Error writing index manifest: %s", e)
+        print(f"Error writing index manifest: {e}")
 
 
 def _update_manifest(action: str, file_path: str) -> None:
@@ -182,15 +182,17 @@ def ingestion_worker():
                 INGESTION_QUEUE.task_done()
                 continue
 
-            print("--- SYNC WORKER: Processing %s for %s ---", action, os.path.basename(file_path))
+            base_name = os.path.basename(file_path)
+
+            print(f"--- SYNC WORKER: Processing {action} for {base_name}")
 
             if action == "delete":
                 try:
                     GLOBAL_VECTORSTORE.delete(where={"source": file_path})
                     _update_manifest("delete", file_path)
-                    print("   - Removed chunks for %s", os.path.basename(file_path))
+                    print(f"   - Removed chunks for {base_name}")
                 except Exception as e:
-                    print("   - Error deleting %s: %s", file_path, e)
+                    print(f"   - Error deleting {file_path}: {e}")
 
             elif action in ["add", "update"]:
                 # For update, we delete first to avoid duplicates
@@ -209,14 +211,14 @@ def ingestion_worker():
                         if splits:
                             GLOBAL_VECTORSTORE.add_documents(splits)
                             _update_manifest("add", file_path)
-                            print("   - Added %d chunks for %s", len(splits), os.path.basename(file_path))
+                            print(f"   - Added {len(splits)} chunks for {os.path.basename(file_path)}")
                 except Exception as e:
-                    print("   - Error ingesting %s: %s", file_path, e)
+                    print(f"   - Error ingesting {file_path}: {e}")
 
             INGESTION_QUEUE.task_done()
 
         except Exception as e:
-            print("Worker error: %s", e)
+            print(f"Worker error: {e}")
 
 
 # --- PART 1: OPTIMIZED INGESTION ENGINE ---
@@ -269,15 +271,16 @@ def initialize_vectorstore():
             updated_files.append(file_path)
 
     # 3. Parallel Loading & Ingestion
+    base_path = os.path.basename(file_path)
     if deleted_files:
         print("--- DETECTED %d DELETED DOCUMENTS ---", len(deleted_files))
         for file_path in deleted_files:
             try:
                 vectorstore.delete(where={"source": file_path})
                 _update_manifest("delete", file_path)
-                print("   - Removed chunks for %s", os.path.basename(file_path))
+                print(f"   - Removed chunks for {base_path}")
             except Exception as e:
-                print("   - Error deleting %s: %s", file_path, e)
+                print(f"   - Error deleting {file_path}: {e}")
 
     files_to_ingest = new_files + updated_files
 
@@ -304,9 +307,9 @@ def initialize_vectorstore():
                 try:
                     loaded_docs = future.result()
                     docs.extend(loaded_docs)
-                    print("   [%d/%d] Loaded: %s", i + 1, len(files_to_ingest), os.path.basename(fp))
+                    print(f"   [{i + 1}/{len(files_to_ingest)}] Loaded: {os.path.basename(fp)}")
                 except Exception as exc:
-                    print("   [%d/%d] Failed: %s generated %s", i + 1, len(files_to_ingest), fp, exc)
+                    print(f"   [{i + 1}/{len(files_to_ingest)}] Failed: {fp} generated {exc}")
 
         if docs:
             print("--- SPLITTING & EMBEDDING %d DOCUMENT CHUNKS ---", len(docs))
@@ -551,7 +554,7 @@ def query_documents(user_input: str, include_sources: bool = False):
             for key, value in output.items():
                 final_state = value
     except Exception as e:
-        print("Query error: %s", e)
+        print(f"Query error: {e}")
         return f"Error: {e}" if not include_sources else {"error": str(e)}
 
     # Extract final generation
