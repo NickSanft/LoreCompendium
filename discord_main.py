@@ -17,7 +17,6 @@ client = commands.Bot(command_prefix=command_prefix, intents=intents)
 @client.event
 async def on_ready():
     print("Logged in as ", client.user)
-    # Ensure input directory exists for drag-and-drop
     if not os.path.exists(DOC_FOLDER):
         os.makedirs("input")
         print("Created 'input' directory.")
@@ -41,16 +40,12 @@ async def lore_slash(interaction: discord.Interaction, query: str):
 
 @client.event
 async def on_message(message: discord.Message):
-    # 1. Ignore our own messages
     if message.author == client.user:
         return
 
-    # 2. DRAG AND DROP SUPPORT (New Feature)
-    # Checks if the message has attachments (files)
     if message.attachments:
         saved_count = 0
         for attachment in message.attachments:
-            # Check if file extension is valid
             ext = os.path.splitext(attachment.filename)[1].lower()
             if ext in SUPPORTED_EXTENSIONS:
                 save_path = os.path.join(DOC_FOLDER, attachment.filename)
