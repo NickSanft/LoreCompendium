@@ -350,6 +350,22 @@ def get_indexed_files() -> dict:
     return _load_index_manifest()
 
 
+def trigger_reindex() -> int:
+    """
+    Queues every file in the input folder for re-ingestion via the background worker.
+    Returns the number of files queued.
+    """
+    count = 0
+    for root, _, files in os.walk(DOC_FOLDER):
+        for file in files:
+            if file.startswith("~$"):
+                continue
+            if file.lower().endswith(SUPPORTED_EXTENSIONS):
+                INGESTION_QUEUE.put(("update", os.path.join(root, file)))
+                count += 1
+    return count
+
+
 def get_retriever(k=4):
     """Returns a retriever interface from the current global vectorstore."""
     global GLOBAL_VECTORSTORE

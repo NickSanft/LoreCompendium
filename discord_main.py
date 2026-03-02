@@ -1,12 +1,13 @@
 import asyncio
+import sys
 import discord
 import os
 from discord import app_commands
 from discord.ext import commands
 
 from conversation import ask_stuff
-from document_engine import query_documents, initialize_vectorstore, get_indexed_files
-from lore_utils import get_key_from_json_config_file, MessageSource, DOC_FOLDER, SUPPORTED_EXTENSIONS
+from document_engine import query_documents, initialize_vectorstore, get_indexed_files, trigger_reindex
+from lore_utils import get_key_from_json_config_file, MessageSource, DOC_FOLDER, SUPPORTED_EXTENSIONS, check_ollama_health
 
 command_prefix = "$"
 intents = discord.Intents.default()
@@ -59,6 +60,7 @@ async def help_slash(interaction: discord.Interaction):
         "**Lore Compendium Commands**\n\n"
         "`/lore <query>` — Search your indexed documents for an answer\n"
         "`/status` — Show which documents are currently indexed\n"
+        "`/reindex` — Force a re-scan of the input folder\n"
         "`/help` — Show this message\n\n"
         "**Conversational Mode**\n"
         "Mention me or send a DM to have a conversation. I can search your documents automatically.\n\n"
@@ -77,6 +79,20 @@ async def status_slash(interaction: discord.Interaction):
         file_list = "\n".join(f"• `{os.path.basename(p)}`" for p in indexed)
         msg = f"**{len(indexed)} document(s) indexed:**\n{file_list}"
     await interaction.response.send_message(msg, ephemeral=True)
+
+
+@client.tree.command(name="reindex", description="Force a re-scan of the input folder for new or changed documents")
+async def reindex_slash(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        count = await asyncio.to_thread(trigger_reindex)
+        if count == 0:
+            msg = "No documents found in the `input` folder. Add some files and try again."
+        else:
+            msg = f"Queued {count} document(s) for re-indexing. Changes will be available shortly."
+    except Exception as e:
+        msg = f"Error starting re-index: {e}"
+    await interaction.followup.send(msg, ephemeral=True)
 
 
 @client.event
@@ -116,7 +132,8 @@ async def on_message(message: discord.Message):
         "This may take a few seconds, please wait. This message will be updated with the result!")
 
     try:
-        original_response = await asyncio.to_thread(ask_stuff, message_clean, author, MessageSource.DISCORD_TEXT)
+        async with message.channel.typing():
+            original_response = await asyncio.to_thread(ask_stuff, message_clean, author, MessageSource.DISCORD_TEXT)
     except Exception as e:
         original_response = f"An error occurred: {e}"
 
@@ -161,5 +178,15 @@ def split_into_chunks(s, chunk_size=2000):
 
 
 if __name__ == '__main__':
+    print("Running pre-flight checks...")
+    errors = check_ollama_health()
+    if errors:
+        print("\n[ERROR] Pre-flight checks failed:")
+        for err in errors:
+            print(err)
+        print("\nFix the above issues and restart the bot.")
+        sys.exit(1)
+    print("[OK] Ollama is running and all models are available.\n")
+
     discord_secret = get_key_from_json_config_file("discord_bot_token", "")
     client.run(discord_secret)
