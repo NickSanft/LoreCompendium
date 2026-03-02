@@ -1,11 +1,11 @@
+import asyncio
 import discord
 import os
 from discord import app_commands
 from discord.ext import commands
 
-# Ensure you have these modules or that they handle the specific logic
 from conversation import ask_stuff
-from document_engine import query_documents
+from document_engine import query_documents, initialize_vectorstore, get_indexed_files
 from lore_utils import get_key_from_json_config_file, MessageSource, DOC_FOLDER, SUPPORTED_EXTENSIONS
 
 command_prefix = "$"
@@ -14,12 +14,23 @@ intents.message_content = True
 client = commands.Bot(command_prefix=command_prefix, intents=intents)
 
 
+async def _startup_init():
+    """Initialize the vectorstore in the background so the bot is ready for queries."""
+    try:
+        await asyncio.to_thread(initialize_vectorstore)
+        print("Vectorstore initialized and ready.")
+    except Exception as e:
+        print(f"Failed to initialize vectorstore on startup: {e}")
+
+
 @client.event
 async def on_ready():
     print("Logged in as ", client.user)
     if not os.path.exists(DOC_FOLDER):
         os.makedirs("input")
         print("Created 'input' directory.")
+
+    asyncio.create_task(_startup_init())
 
     try:
         # This registers the slash commands with Discord
@@ -34,8 +45,38 @@ async def on_ready():
 async def lore_slash(interaction: discord.Interaction, query: str):
     print(f"Slash Lore request: {query}")
     await interaction.response.defer(thinking=True)
-    response = query_documents(query)
+    try:
+        response = await asyncio.to_thread(query_documents, query)
+    except Exception as e:
+        response = f"An error occurred while searching: {e}"
     await chunk_and_send(ctx=None, original_message=None, original_response=response, interaction=interaction)
+
+
+@client.tree.command(name="help", description="Show available bot commands")
+async def help_slash(interaction: discord.Interaction):
+    supported = ", ".join(SUPPORTED_EXTENSIONS)
+    help_text = (
+        "**Lore Compendium Commands**\n\n"
+        "`/lore <query>` — Search your indexed documents for an answer\n"
+        "`/status` — Show which documents are currently indexed\n"
+        "`/help` — Show this message\n\n"
+        "**Conversational Mode**\n"
+        "Mention me or send a DM to have a conversation. I can search your documents automatically.\n\n"
+        "**Adding Documents**\n"
+        f"Drag and drop a file into any channel. Supported formats: {supported}"
+    )
+    await interaction.response.send_message(help_text, ephemeral=True)
+
+
+@client.tree.command(name="status", description="Show which documents are currently indexed")
+async def status_slash(interaction: discord.Interaction):
+    indexed = get_indexed_files()
+    if not indexed:
+        msg = "No documents are currently indexed. Add files to the `input` folder or drag and drop them here."
+    else:
+        file_list = "\n".join(f"• `{os.path.basename(p)}`" for p in indexed)
+        msg = f"**{len(indexed)} document(s) indexed:**\n{file_list}"
+    await interaction.response.send_message(msg, ephemeral=True)
 
 
 @client.event
@@ -59,7 +100,7 @@ async def on_message(message: discord.Message):
                 f"📥 **Received!** Saved {saved_count} document(s) to the `input` folder.\n*If you have live-sync enabled, these will be indexed shortly.*")
             return
 
-    # 3. Handle Conversational/DM Logic
+    # Handle Conversational/DM Logic
     channel_type = message.channel
     is_dm = isinstance(channel_type, discord.DMChannel)
     is_mention = client.user.mentioned_in(message)
@@ -74,10 +115,11 @@ async def on_message(message: discord.Message):
     original_message = await message.channel.send(
         "This may take a few seconds, please wait. This message will be updated with the result!")
 
-    # Pass the clean message to your AI logic
-    original_response = ask_stuff(message_clean, author, MessageSource.DISCORD_TEXT)
+    try:
+        original_response = await asyncio.to_thread(ask_stuff, message_clean, author, MessageSource.DISCORD_TEXT)
+    except Exception as e:
+        original_response = f"An error occurred: {e}"
 
-    # We pass message.channel as 'ctx' because chunk_and_send expects an object with .send()
     await chunk_and_send(message.channel, original_message, original_response)
 
 
@@ -90,7 +132,6 @@ async def chunk_and_send(ctx, original_message, original_response, interaction: 
     elif hasattr(ctx, 'author'):
         author = ctx.author.name
     else:
-        # Fallback if ctx is just a channel object (from on_message)
         author = "User"
 
     if resp_len > 2000:

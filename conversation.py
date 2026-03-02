@@ -1,13 +1,12 @@
 import re
 
-from langchain.agents import create_agent
 from langchain_core.runnables import RunnableConfig
-from langchain_core.stores import InMemoryStore
 from langchain_core.tools import tool
 from langchain_ollama import ChatOllama
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.constants import END, START
 from langgraph.graph import MessagesState, StateGraph
+from langgraph.prebuilt import create_react_agent
 
 import document_engine
 from lore_utils import MessageSource, SYSTEM_DESCRIPTION, THINKING_OLLAMA_MODEL
@@ -28,18 +27,19 @@ Tools:
     """
 
 
-@tool(parse_docstring=True)
-def search_documents(query: str):
-    """
-    Use this tool to get information when the user asks about the description provided in the prompt.
-
-    Args:
-    query: The question or search term to look for in the documents that match the search_documents description.
-
-    Returns:
-    string: The answer derived from the documents.
-    """
+@tool
+def search_documents(query: str) -> str:
+    """Search indexed local documents for information."""
     return document_engine.query_documents(query)
+
+
+# Set description dynamically so the LLM knows when to invoke this tool
+search_documents.description = (
+    f"Search the local document library for information. "
+    f"The documents relate to: {SYSTEM_DESCRIPTION} "
+    f"Use this tool for any question the user asks that might be covered in the documents "
+    f"rather than answered from general knowledge."
+)
 
 
 def get_config_values(config: RunnableConfig) -> RunnableConfig:
@@ -49,17 +49,17 @@ def get_config_values(config: RunnableConfig) -> RunnableConfig:
             "user_id": metadata.get("user_id"),
             "thread_id": metadata.get("thread_id"),
         },
-        "metadata": metadata  # Preserve full metadata including progress_callback
+        "metadata": metadata
     }
     return config_values
 
 
 def conversation(state: MessagesState, config: RunnableConfig):
     messages = state["messages"]
-    latest_message = messages[-1].content if messages else ""
-    print("Latest message: %s", latest_message)
-    inputs = {"messages": [("system", get_system_description()),
-                           ("user", latest_message)]}
+    print(f"Latest message: {messages[-1].content if messages else ''}")
+
+    # Pass the full accumulated history so the inner agent has conversation context
+    inputs = {"messages": [("system", get_system_description())] + list(messages)}
 
     final_state = None
 
@@ -70,7 +70,7 @@ def conversation(state: MessagesState, config: RunnableConfig):
         if "messages" in s and s["messages"]:
             latest = s["messages"][-1]
             if hasattr(latest, 'tool_calls') and latest.tool_calls:
-                print("Detected tool calls: %s", [tc.get('name', '') for tc in latest.tool_calls])
+                print(f"Detected tool calls: {[tc.get('name', '') for tc in latest.tool_calls]}")
 
     resp = final_state["messages"][-1].content if final_state and "messages" in final_state else ""
     return {'messages': [resp]}
@@ -95,13 +95,12 @@ def format_prompt(prompt: str, source: MessageSource, user_id: str) -> str:
     """
 
 
-def ask_stuff(base_prompt: str, user_id: str, source: MessageSource) -> dict:
+def ask_stuff(base_prompt: str, user_id: str, source: MessageSource) -> str:
     user_id_clean = re.sub(r'[^a-zA-Z0-9]', '', user_id)  # Clean special characters
     full_prompt = format_prompt(base_prompt, source, user_id_clean)
 
-    system_prompt = get_system_description()
-    print("Role description: %s", system_prompt)
-    print("Prompt to ask: %s", full_prompt)
+    print(f"Role description: {get_system_description()}")
+    print(f"Prompt to ask: {full_prompt}")
 
     config = {
         "configurable": {"user_id": user_id_clean, "thread_id": user_id_clean}
@@ -115,7 +114,7 @@ def ask_stuff(base_prompt: str, user_id: str, source: MessageSource) -> dict:
         message = s["messages"][-1] if "messages" in s and s["messages"] else None
         if message:
             if isinstance(message, tuple):
-                print("Message tuple: %s", message)
+                print(f"Message tuple: {message}")
             elif hasattr(message, 'pretty_print'):
                 message.pretty_print()
 
@@ -129,7 +128,7 @@ def ask_stuff(base_prompt: str, user_id: str, source: MessageSource) -> dict:
 
 ollama_instance = ChatOllama(model=THINKING_OLLAMA_MODEL)
 conversation_tools = [search_documents]
-conversation_react_agent = create_agent(ollama_instance, tools=conversation_tools)
+conversation_react_agent = create_react_agent(ollama_instance, conversation_tools)
 
 workflow = StateGraph(MessagesState)
 
@@ -137,4 +136,4 @@ workflow.add_edge(START, CONVERSATION_NODE)
 workflow.add_node(CONVERSATION_NODE, conversation)
 workflow.add_edge(CONVERSATION_NODE, END)
 
-app = workflow.compile(checkpointer=MemorySaver(), store=InMemoryStore())
+app = workflow.compile(checkpointer=MemorySaver())
