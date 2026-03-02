@@ -33,3 +33,5 @@ FAST_OLLAMA_MODEL = get_key_from_json_config_file("fast_ollama_model", "llama3.2
 EMBEDDING_MODEL = get_key_from_json_config_file("embedding_model", "mxbai-embed-large")
 SUPPORTED_EXTENSIONS = ('.docx', '.pdf', '.xlsx', '.csv', '.txt', '.md')
 DOC_FOLDER = "./input"
+CHROMA_DB_PATH = "./chroma_store"
+CHROMA_COLLECTION_NAME = "word_docs_rag"

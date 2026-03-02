@@ -34,8 +34,8 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import END, StateGraph, START
 
-from chroma_store import CHROMA_COLLECTION_NAME, CHROMA_DB_PATH
-from lore_utils import THINKING_OLLAMA_MODEL, FAST_OLLAMA_MODEL, EMBEDDING_MODEL, SUPPORTED_EXTENSIONS, DOC_FOLDER
+from lore_utils import CHROMA_COLLECTION_NAME, CHROMA_DB_PATH, THINKING_OLLAMA_MODEL, FAST_OLLAMA_MODEL, \
+    EMBEDDING_MODEL, SUPPORTED_EXTENSIONS, DOC_FOLDER
 
 # Define supported file extensions
 
@@ -271,14 +271,13 @@ def initialize_vectorstore():
             updated_files.append(file_path)
 
     # 3. Parallel Loading & Ingestion
-    base_path = os.path.basename(file_path)
     if deleted_files:
-        print("--- DETECTED %d DELETED DOCUMENTS ---", len(deleted_files))
+        print(f"--- DETECTED {len(deleted_files)} DELETED DOCUMENTS ---")
         for file_path in deleted_files:
             try:
                 vectorstore.delete(where={"source": file_path})
                 _update_manifest("delete", file_path)
-                print(f"   - Removed chunks for {base_path}")
+                print(f"   - Removed chunks for {os.path.basename(file_path)}")
             except Exception as e:
                 print(f"   - Error deleting {file_path}: {e}")
 
@@ -286,9 +285,9 @@ def initialize_vectorstore():
 
     if files_to_ingest:
         if new_files:
-            print("--- DETECTED %d NEW DOCUMENTS ---", len(new_files))
+            print(f"--- DETECTED {len(new_files)} NEW DOCUMENTS ---")
         if updated_files:
-            print("--- DETECTED %d UPDATED DOCUMENTS ---", len(updated_files))
+            print(f"--- DETECTED {len(updated_files)} UPDATED DOCUMENTS ---")
 
         for file_path in updated_files:
             try:
@@ -312,7 +311,7 @@ def initialize_vectorstore():
                     print(f"   [{i + 1}/{len(files_to_ingest)}] Failed: {fp} generated {exc}")
 
         if docs:
-            print("--- SPLITTING & EMBEDDING %d DOCUMENT CHUNKS ---", len(docs))
+            print(f"--- SPLITTING & EMBEDDING {len(docs)} DOCUMENT CHUNKS ---")
             text_splitter = RecursiveCharacterTextSplitter(
                 chunk_size=1000,
                 chunk_overlap=200,
@@ -346,7 +345,12 @@ def initialize_vectorstore():
     return vectorstore
 
 
-def get_retriever(k=2):
+def get_indexed_files() -> dict:
+    """Returns the index manifest. Keys are file paths, values are {mtime, size} dicts."""
+    return _load_index_manifest()
+
+
+def get_retriever(k=4):
     """Returns a retriever interface from the current global vectorstore."""
     global GLOBAL_VECTORSTORE
     if GLOBAL_VECTORSTORE is None:
