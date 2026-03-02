@@ -12,3 +12,7 @@ langchain-text-splitters~=1.1.0
 langchain-chroma
 langchain-ollama
 typing-extensions
+
+unstructured
+python-docx
+pypdf
