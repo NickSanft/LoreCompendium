@@ -395,6 +395,120 @@ class TestTriggerReindex(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Content-hash duplicate detection
+# ---------------------------------------------------------------------------
+
+class TestGetDuplicateSource(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        import document_engine
+        self._orig_path = document_engine.INDEXED_FILES_PATH
+        document_engine.INDEXED_FILES_PATH = os.path.join(self.tmp, "indexed_files.txt")
+
+    def tearDown(self):
+        import document_engine
+        document_engine.INDEXED_FILES_PATH = self._orig_path
+
+    def _write_file(self, name: str, content: bytes) -> str:
+        path = os.path.join(self.tmp, name)
+        with open(path, "wb") as f:
+            f.write(content)
+        return path
+
+    def test_returns_none_when_no_manifest(self):
+        import document_engine
+        path = self._write_file("new.txt", b"hello")
+        self.assertIsNone(document_engine.get_duplicate_source(path))
+
+    def test_returns_none_when_no_match(self):
+        import document_engine
+        existing = self._write_file("existing.txt", b"different content")
+        document_engine._update_manifest("add", existing)
+        new = self._write_file("new.txt", b"totally different")
+        self.assertIsNone(document_engine.get_duplicate_source(new))
+
+    def test_detects_identical_content_under_different_name(self):
+        import document_engine
+        content = b"identical content"
+        existing = self._write_file("existing.txt", content)
+        document_engine._update_manifest("add", existing)
+        new = self._write_file("copy.txt", content)
+        result = document_engine.get_duplicate_source(new)
+        self.assertEqual(result, "existing.txt")
+
+    def test_does_not_flag_self_as_duplicate(self):
+        import document_engine
+        content = b"some content"
+        path = self._write_file("file.txt", content)
+        document_engine._update_manifest("add", path)
+        # Same path re-checked should not flag itself
+        result = document_engine.get_duplicate_source(path)
+        self.assertIsNone(result)
+
+    def test_returns_none_for_nonexistent_file(self):
+        import document_engine
+        self.assertIsNone(document_engine.get_duplicate_source("/nonexistent/file.txt"))
+
+
+# ---------------------------------------------------------------------------
+# Scoped document query
+# ---------------------------------------------------------------------------
+
+class TestQueryDocumentsScoped(unittest.TestCase):
+    def _make_stream_output(self, generation="Scoped answer"):
+        from langchain_core.documents import Document
+        doc = Document(page_content="chunk", metadata={"source": "/input/lore.txt", "start_index": 0})
+        return [
+            {"retrieve": {"documents": [doc], "question": "q", "scoped_source": "/input/lore.txt"}},
+            {"grade_documents": {"documents": [doc], "question": "q"}},
+            {"generate_rag": {"generation": generation, "documents": [doc]}},
+        ]
+
+    def test_returns_not_found_message_for_unknown_filename(self):
+        import document_engine
+        with patch.object(document_engine, "GLOBAL_VECTORSTORE", MagicMock()):
+            with patch.object(document_engine, "_load_index_manifest", return_value={}):
+                result = document_engine.query_documents_scoped("q", "ghost.pdf")
+        self.assertIn("ghost.pdf", result)
+        self.assertIn("/status", result)
+
+    def test_returns_answer_for_known_filename(self):
+        import document_engine
+        manifest = {"/input/lore.txt": {"mtime": 1.0, "size": 10}}
+        with patch.object(document_engine, "GLOBAL_VECTORSTORE", MagicMock()):
+            with patch.object(document_engine, "_load_index_manifest", return_value=manifest):
+                with patch.object(document_engine.app, "stream",
+                                  return_value=self._make_stream_output("Scoped answer")):
+                    result = document_engine.query_documents_scoped("q", "lore.txt")
+        self.assertEqual(result, "Scoped answer")
+
+    def test_sets_scoped_source_in_graph_inputs(self):
+        import document_engine
+        manifest = {"/input/lore.txt": {"mtime": 1.0, "size": 10}}
+        captured_inputs = {}
+
+        def capturing_stream(inputs, config=None):
+            captured_inputs.update(inputs)
+            return iter(self._make_stream_output())
+
+        with patch.object(document_engine, "GLOBAL_VECTORSTORE", MagicMock()):
+            with patch.object(document_engine, "_load_index_manifest", return_value=manifest):
+                with patch.object(document_engine.app, "stream", side_effect=capturing_stream):
+                    document_engine.query_documents_scoped("q", "lore.txt")
+
+        self.assertEqual(captured_inputs.get("scoped_source"), "/input/lore.txt")
+
+    def test_not_found_returns_dict_with_include_sources(self):
+        import document_engine
+        with patch.object(document_engine, "GLOBAL_VECTORSTORE", MagicMock()):
+            with patch.object(document_engine, "_load_index_manifest", return_value={}):
+                result = document_engine.query_documents_scoped("q", "ghost.pdf", include_sources=True)
+        self.assertIsInstance(result, dict)
+        self.assertIn("answer", result)
+        self.assertEqual(result["citations"], [])
+
+
+# ---------------------------------------------------------------------------
 # Embeddings cache
 # ---------------------------------------------------------------------------
 
@@ -437,7 +551,7 @@ class TestRetrieveUsesK4(unittest.TestCase):
         import document_engine
         captured = {}
 
-        def fake_get_retriever(k=4):
+        def fake_get_retriever(k=4, source_filter=None):
             captured["k"] = k
             mock_retriever = MagicMock()
             mock_retriever.invoke.return_value = []
