@@ -139,11 +139,12 @@ def create_config():
         print("\nConfiguration not saved.")
         return False
 
-    # Save to file
+    # Save to the same directory as this script (where lore_utils.py will look)
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
     try:
-        with open('config.json', 'w', encoding='utf-8') as f:
+        with open(config_path, 'w', encoding='utf-8') as f:
             json.dump(config, f, indent=2)
-        print("\n[OK] Configuration saved to config.json!")
+        print(f"\n[OK] Configuration saved to {config_path}!")
         return True
     except Exception as e:
         print(f"\n[ERROR] Failed to save config.json: {e}")
@@ -153,8 +154,9 @@ def create_config():
 def main():
     """Entry point."""
     try:
-        # Check if config already exists
-        if os.path.exists('config.json'):
+        # Check if config already exists (same path lore_utils.py resolves to)
+        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+        if os.path.exists(config_path):
             print("\n[WARNING] config.json already exists!")
             overwrite = input("Do you want to overwrite it? (y/n): ").strip().lower()
             if overwrite != 'y':

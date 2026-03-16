@@ -199,7 +199,7 @@ def ingestion_worker():
                 if action == "update":
                     try:
                         GLOBAL_VECTORSTORE.delete(where={"source": file_path})
-                    except:
+                    except Exception:
                         pass  # Might not exist yet
 
                 # Load and Ingest
@@ -561,25 +561,32 @@ def query_documents(user_input: str, include_sources: bool = False):
     """Execution wrapper returning Answer (and optional structured sources)."""
     inputs = {"question": user_input, "loop_step": 0}
 
-    final_state = None
-
     # Run the graph
     config = {"recursion_limit": 25}
     if GLOBAL_VECTORSTORE is None:
         initialize_vectorstore()
 
+    final_state = None
+    generate_rag_state = None
+
     try:
-        # We iterate through the stream to print progress, but we need the final state
         for output in app.stream(inputs, config=config):
             for key, value in output.items():
                 final_state = value
+                if key == "generate_rag":
+                    generate_rag_state = value
     except Exception as e:
         print(f"Query error: {e}")
         return f"Error: {e}" if not include_sources else {"error": str(e)}
 
+    result_state = generate_rag_state if generate_rag_state is not None else final_state
+    if result_state is None:
+        no_answer = "No answer generated."
+        return no_answer if not include_sources else {"answer": no_answer, "citations": []}
+
     # Extract final generation
-    final_answer = final_state.get("generation", "No answer generated.")
-    used_docs = final_state.get("documents", [])
+    final_answer = result_state.get("generation", "No answer generated.")
+    used_docs = result_state.get("documents", [])
 
     # Format the sources list programmatically
     sources_data = []
