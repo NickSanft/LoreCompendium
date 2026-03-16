@@ -1,5 +1,6 @@
 import asyncio
 import sys
+import time
 import discord
 import os
 from discord import app_commands
@@ -8,6 +9,30 @@ from discord.ext import commands
 from conversation import ask_stuff
 from document_engine import query_documents, initialize_vectorstore, get_indexed_files, trigger_reindex
 from lore_utils import get_key_from_json_config_file, MessageSource, DOC_FOLDER, SUPPORTED_EXTENSIONS, check_ollama_health
+
+_RATE_LIMIT_SECONDS = 10
+_MAX_QUERY_LENGTH = 500
+_user_last_query: dict[str, float] = {}
+
+
+def _check_rate_limit(user_id: str) -> float:
+    """Returns 0.0 if the user is allowed through, or remaining cooldown seconds if not."""
+    now = time.time()
+    remaining = _RATE_LIMIT_SECONDS - (now - _user_last_query.get(user_id, 0.0))
+    if remaining > 0:
+        return remaining
+    _user_last_query[user_id] = now
+    return 0.0
+
+
+def _validate_query(query: str) -> str | None:
+    """Returns an error message if the query is invalid, or None if it is fine."""
+    if not query.strip():
+        return "Query cannot be empty."
+    if len(query) > _MAX_QUERY_LENGTH:
+        return f"Query is too long ({len(query)} chars). Please keep it under {_MAX_QUERY_LENGTH} characters."
+    return None
+
 
 command_prefix = "$"
 intents = discord.Intents.default()
@@ -44,6 +69,17 @@ async def on_ready():
 @client.tree.command(name="lore", description="Search your documents for an answer")
 @app_commands.describe(query="The question you want to ask about your lore")
 async def lore_slash(interaction: discord.Interaction, query: str):
+    error = _validate_query(query)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return
+
+    remaining = _check_rate_limit(str(interaction.user.id))
+    if remaining > 0:
+        await interaction.response.send_message(
+            f"Please wait {remaining:.1f}s before sending another query.", ephemeral=True)
+        return
+
     print(f"Slash Lore request: {query}")
     await interaction.response.defer(thinking=True)
     try:
@@ -126,6 +162,17 @@ async def on_message(message: discord.Message):
 
     message_clean = message.clean_content
     author = message.author.name
+
+    error = _validate_query(message_clean)
+    if error:
+        await message.channel.send(error)
+        return
+
+    remaining = _check_rate_limit(str(message.author.id))
+    if remaining > 0:
+        await message.channel.send(f"Please wait {remaining:.1f}s before sending another message.")
+        return
+
     print("Lore request: ", message_clean)
 
     original_message = await message.channel.send(
@@ -138,6 +185,12 @@ async def on_message(message: discord.Message):
         original_response = f"An error occurred: {e}"
 
     await chunk_and_send(message.channel, original_message, original_response)
+
+
+@client.event
+async def on_close():
+    from document_engine import shutdown
+    await asyncio.to_thread(shutdown)
 
 
 async def chunk_and_send(ctx, original_message, original_response, interaction: discord.Interaction = None):
