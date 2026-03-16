@@ -110,30 +110,29 @@ def ask_stuff(base_prompt: str, user_id: str, source: MessageSource) -> str:
     user_id_clean = re.sub(r'[^a-zA-Z0-9]', '', user_id)  # Clean special characters
     full_prompt = format_prompt(base_prompt, source, user_id_clean)
 
-    print(f"Role description: {get_system_description()}")
-    print(f"Prompt to ask: {full_prompt}")
+    logger.debug(f"[CONVERSATION] → {THINKING_OLLAMA_MODEL}"
+                 f"\n  system : {get_system_description()}"
+                 f"\n  prompt : {full_prompt}")
 
     config = {
         "configurable": {"user_id": user_id_clean, "thread_id": user_id_clean}
     }
     inputs = {"messages": [("user", full_prompt)]}
 
-    # Collect final state from the stream
     final_state = None
     for s in app.stream(inputs, config=config, stream_mode="values"):
         final_state = s
         message = s["messages"][-1] if "messages" in s and s["messages"] else None
         if message:
-            if isinstance(message, tuple):
-                print(f"Message tuple: {message}")
-            elif hasattr(message, 'pretty_print'):
-                message.pretty_print()
+            content = message[1] if isinstance(message, tuple) else getattr(message, "content", str(message))
+            logger.debug(f"[CONVERSATION] ← message: {content!r}")
 
     final_text = ""
     if final_state and "messages" in final_state and final_state["messages"]:
         last_msg = final_state["messages"][-1]
         final_text = last_msg.content if hasattr(last_msg, 'content') else str(last_msg)
 
+    logger.debug(f"[CONVERSATION] final response: {final_text!r}")
     return final_text
 
 

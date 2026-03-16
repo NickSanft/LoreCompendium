@@ -497,86 +497,86 @@ class GraphState(TypedDict):
 
 
 def retrieve(state):
-    logger.debug("RETRIEVE")
     question = state["question"]
     scoped_source = state.get("scoped_source")
+    logger.debug(f"[RETRIEVE] question: {question!r}" +
+                 (f" | scoped to: {os.path.basename(scoped_source)}" if scoped_source else ""))
 
-    # Always fetch a fresh retriever instance to ensure it sees latest DB updates
     retriever = get_retriever(k=4, source_filter=scoped_source)
-
     documents = retriever.invoke(question)
+
+    sources = [os.path.basename(d.metadata.get("source", "?")) for d in documents]
+    logger.debug(f"[RETRIEVE] got {len(documents)} doc(s): {sources}")
     return {"documents": documents, "question": question}
 
 
 def grade_documents(state):
-    logger.debug("CHECK DOCUMENT RELEVANCE (BATCHED)")
     question = state["question"]
     documents = state["documents"]
+    logger.debug(f"[GRADE] grading {len(documents)} doc(s) against question: {question!r}")
 
     if not documents:
+        logger.debug("[GRADE] no documents to grade")
         return {"documents": [], "question": question}
 
-    # Optimization: Batching
     batch_inputs = [{"question": question, "document": d.page_content} for d in documents]
-
-    # Run LLM on all docs in parallel/batch
     scores = grader_chain.batch(batch_inputs)
 
     filtered_docs = []
     for i, score in enumerate(scores):
-        if score.binary_score == "yes":
-            logger.debug(f"Doc {i + 1}: RELEVANT")
+        source = os.path.basename(documents[i].metadata.get("source", "?"))
+        verdict = score.binary_score
+        logger.debug(f"[GRADE] doc {i + 1} ({source}): {verdict.upper()}")
+        if verdict == "yes":
             filtered_docs.append(documents[i])
-        else:
-            logger.debug(f"Doc {i + 1}: NOT RELEVANT")
 
+    logger.debug(f"[GRADE] {len(filtered_docs)}/{len(documents)} docs passed")
     return {"documents": filtered_docs, "question": question}
 
 
 def generate_rag(state):
-    logger.debug("GENERATE RAG")
     question = state["question"]
     documents = state["documents"]
 
     formatted_context_list = []
 
     for doc in documents:
-        # 1. Extract Source Name
         source_name = os.path.basename(doc.metadata.get("source", "Unknown"))
 
-        # 2. Extract Location (Page for PDF, Start Index/Line approx for Text)
-        location = ""
         if "page" in doc.metadata:
-            # PyPDFLoader is 0-indexed
             location = f"Page {doc.metadata['page'] + 1}"
         elif "start_index" in doc.metadata:
             location = f"Char Index {doc.metadata['start_index']}"
         else:
             location = "Unknown Location"
 
-        # 3. Format the context for the LLM
         formatted_entry = f"[Source: {source_name} | Location: {location}]\n{doc.page_content}"
         formatted_context_list.append(formatted_entry)
 
     full_context_string = "\n\n---\n\n".join(formatted_context_list)
 
-    logger.debug(f"Streaming response from {THINKING_OLLAMA_MODEL}")
-    generation = ""
+    logger.debug(
+        f"[GENERATE] → {THINKING_OLLAMA_MODEL}"
+        f"\n  question : {question!r}"
+        f"\n  context  : {len(full_context_string)} chars across {len(documents)} chunk(s)"
+        f"\n{full_context_string}"
+    )
 
+    generation = ""
     for chunk in rag_chain.stream({"context": full_context_string, "question": question}):
         generation += chunk
 
-    # Return generation AND pass the documents through
+    logger.debug(f"[GENERATE] ← response:\n{generation}")
     return {"generation": generation, "documents": documents}
 
 
 def transform_query(state):
-    logger.debug("TRANSFORM QUERY")
     question = state["question"]
     documents = state["documents"]
     loop_step = state.get("loop_step", 0)
+    logger.debug(f"[REWRITE] → {FAST_OLLAMA_MODEL} | attempt {loop_step + 1} | input: {question!r}")
     better_question = rewriter_chain.invoke({"question": question})
-    logger.debug(f"Rewritten query: {better_question}")
+    logger.debug(f"[REWRITE] ← output: {better_question!r}")
     return {"documents": documents, "question": better_question, "loop_step": loop_step + 1}
 
 

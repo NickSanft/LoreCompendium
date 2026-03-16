@@ -305,7 +305,7 @@ def split_into_chunks(s, chunk_size=2000):
 
 
 if __name__ == '__main__':
-    setup_logging()
+    setup_logging(level=logging.DEBUG)
     logger.info("Running pre-flight checks...")
     errors = check_ollama_health()
     if errors:
