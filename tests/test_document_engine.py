@@ -1,0 +1,398 @@
+"""
+Tests for document_engine.py
+
+Covers manifest I/O, graph routing logic, file loading dispatch, and the
+query_documents entry point. Ollama and ChromaDB calls are mocked throughout
+so these tests run without any external services.
+"""
+import json
+import os
+import sys
+import tempfile
+import threading
+import unittest
+from unittest.mock import MagicMock, patch
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+# ---------------------------------------------------------------------------
+# Manifest helpers
+# ---------------------------------------------------------------------------
+
+class TestLoadIndexManifest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        import document_engine
+        self._orig = document_engine.INDEXED_FILES_PATH
+        document_engine.INDEXED_FILES_PATH = os.path.join(self.tmp, "indexed_files.txt")
+
+    def tearDown(self):
+        import document_engine
+        document_engine.INDEXED_FILES_PATH = self._orig
+
+    def _path(self):
+        import document_engine
+        return document_engine.INDEXED_FILES_PATH
+
+    def test_returns_empty_dict_when_file_missing(self):
+        import document_engine
+        result = document_engine._load_index_manifest()
+        self.assertEqual(result, {})
+
+    def test_returns_empty_dict_for_empty_file(self):
+        open(self._path(), "w").close()
+        import document_engine
+        result = document_engine._load_index_manifest()
+        self.assertEqual(result, {})
+
+    def test_parses_valid_json_manifest(self):
+        data = {"file_a.txt": {"mtime": 1.0, "size": 100}}
+        with open(self._path(), "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        import document_engine
+        result = document_engine._load_index_manifest()
+        self.assertEqual(result, data)
+
+    def test_parses_legacy_newline_format(self):
+        with open(self._path(), "w", encoding="utf-8") as f:
+            f.write("file_a.txt\nfile_b.txt\n")
+        import document_engine
+        result = document_engine._load_index_manifest()
+        self.assertIn("file_a.txt", result)
+        self.assertIn("file_b.txt", result)
+
+    def test_returns_empty_dict_for_corrupt_json(self):
+        with open(self._path(), "w", encoding="utf-8") as f:
+            f.write("{bad json")
+        import document_engine
+        result = document_engine._load_index_manifest()
+        self.assertEqual(result, {})
+
+
+class TestWriteIndexManifest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        import document_engine
+        self._orig = document_engine.INDEXED_FILES_PATH
+        document_engine.INDEXED_FILES_PATH = os.path.join(self.tmp, "indexed_files.txt")
+
+    def tearDown(self):
+        import document_engine
+        document_engine.INDEXED_FILES_PATH = self._orig
+
+    def test_writes_valid_json(self):
+        data = {"some/file.txt": {"mtime": 123.4, "size": 500}}
+        import document_engine
+        document_engine._write_index_manifest(data)
+        with open(document_engine.INDEXED_FILES_PATH, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        self.assertEqual(loaded, data)
+
+    def test_roundtrip(self):
+        data = {"a.docx": {"mtime": 1.0, "size": 1}, "b.pdf": {"mtime": 2.0, "size": 2}}
+        import document_engine
+        document_engine._write_index_manifest(data)
+        result = document_engine._load_index_manifest()
+        self.assertEqual(result, data)
+
+
+class TestGetFileSignature(unittest.TestCase):
+    def test_returns_mtime_and_size(self):
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            f.write(b"hello world")
+            path = f.name
+        try:
+            import document_engine
+            sig = document_engine._get_file_signature(path)
+            self.assertIn("mtime", sig)
+            self.assertIn("size", sig)
+            self.assertEqual(sig["size"], 11)
+        finally:
+            os.unlink(path)
+
+
+class TestUpdateManifest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        import document_engine
+        self._orig = document_engine.INDEXED_FILES_PATH
+        document_engine.INDEXED_FILES_PATH = os.path.join(self.tmp, "indexed_files.txt")
+
+    def tearDown(self):
+        import document_engine
+        document_engine.INDEXED_FILES_PATH = self._orig
+
+    def test_add_action_writes_signature(self):
+        with tempfile.NamedTemporaryFile(dir=self.tmp, delete=False, suffix=".txt") as f:
+            f.write(b"data")
+            path = f.name
+        import document_engine
+        document_engine._update_manifest("add", path)
+        manifest = document_engine._load_index_manifest()
+        self.assertIn(path, manifest)
+        self.assertIn("mtime", manifest[path])
+
+    def test_delete_action_removes_entry(self):
+        with tempfile.NamedTemporaryFile(dir=self.tmp, delete=False, suffix=".txt") as f:
+            f.write(b"data")
+            path = f.name
+        import document_engine
+        document_engine._update_manifest("add", path)
+        document_engine._update_manifest("delete", path)
+        manifest = document_engine._load_index_manifest()
+        self.assertNotIn(path, manifest)
+
+    def test_add_nonexistent_file_does_not_crash(self):
+        import document_engine
+        document_engine._update_manifest("add", "/nonexistent/path/file.txt")
+        manifest = document_engine._load_index_manifest()
+        self.assertNotIn("/nonexistent/path/file.txt", manifest)
+
+
+# ---------------------------------------------------------------------------
+# Graph routing
+# ---------------------------------------------------------------------------
+
+class TestDecideToGenerate(unittest.TestCase):
+    def test_returns_generate_when_documents_present(self):
+        import document_engine
+        state = {"documents": [MagicMock()], "loop_step": 0}
+        self.assertEqual(document_engine.decide_to_generate(state), "generate")
+
+    def test_returns_transform_query_when_no_docs_and_under_limit(self):
+        import document_engine
+        state = {"documents": [], "loop_step": 0}
+        self.assertEqual(document_engine.decide_to_generate(state), "transform_query")
+
+    def test_returns_generate_when_no_docs_but_at_limit(self):
+        import document_engine
+        state = {"documents": [], "loop_step": 3}
+        self.assertEqual(document_engine.decide_to_generate(state), "generate")
+
+    def test_returns_generate_when_loop_step_exceeds_limit(self):
+        import document_engine
+        state = {"documents": [], "loop_step": 5}
+        self.assertEqual(document_engine.decide_to_generate(state), "generate")
+
+    def test_missing_loop_step_defaults_to_zero(self):
+        import document_engine
+        state = {"documents": []}
+        self.assertEqual(document_engine.decide_to_generate(state), "transform_query")
+
+
+# ---------------------------------------------------------------------------
+# File loading dispatch
+# ---------------------------------------------------------------------------
+
+class TestLoadDocumentByExtension(unittest.TestCase):
+    def test_returns_empty_list_for_nonexistent_file(self):
+        import document_engine
+        result = document_engine.load_document_by_extension("/nonexistent/path/file.pdf")
+        self.assertEqual(result, [])
+
+    def test_returns_empty_list_for_unsupported_extension(self):
+        with tempfile.NamedTemporaryFile(suffix=".xyz", delete=False) as f:
+            path = f.name
+        try:
+            import document_engine
+            result = document_engine.load_document_by_extension(path)
+            self.assertEqual(result, [])
+        finally:
+            os.unlink(path)
+
+    def _make_temp(self, suffix):
+        f = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        f.write(b"dummy content")
+        f.close()
+        return f.name
+
+    def test_pdf_dispatches_to_pypdf_loader(self):
+        path = self._make_temp(".pdf")
+        try:
+            mock_doc = MagicMock()
+            with patch("document_engine.load_pdf", return_value=[mock_doc]) as mock_load:
+                import document_engine
+                result = document_engine.load_document_by_extension(path)
+            mock_load.assert_called_once_with(path)
+            self.assertEqual(result, [mock_doc])
+        finally:
+            os.unlink(path)
+
+    def test_docx_dispatches_to_word_loader(self):
+        path = self._make_temp(".docx")
+        try:
+            mock_doc = MagicMock()
+            with patch("document_engine.UnstructuredWordDocumentLoader") as MockLoader:
+                MockLoader.return_value.load.return_value = [mock_doc]
+                import document_engine
+                result = document_engine.load_document_by_extension(path)
+            self.assertEqual(result, [mock_doc])
+        finally:
+            os.unlink(path)
+
+    def test_txt_dispatches_to_text_loader(self):
+        path = self._make_temp(".txt")
+        try:
+            mock_doc = MagicMock()
+            with patch("document_engine.TextLoader") as MockLoader:
+                MockLoader.return_value.load.return_value = [mock_doc]
+                import document_engine
+                result = document_engine.load_document_by_extension(path)
+            self.assertEqual(result, [mock_doc])
+        finally:
+            os.unlink(path)
+
+    def test_md_dispatches_to_text_loader(self):
+        path = self._make_temp(".md")
+        try:
+            mock_doc = MagicMock()
+            with patch("document_engine.TextLoader") as MockLoader:
+                MockLoader.return_value.load.return_value = [mock_doc]
+                import document_engine
+                result = document_engine.load_document_by_extension(path)
+            self.assertEqual(result, [mock_doc])
+        finally:
+            os.unlink(path)
+
+    def test_loader_exception_returns_empty_list(self):
+        path = self._make_temp(".pdf")
+        try:
+            with patch("document_engine.load_pdf", side_effect=RuntimeError("corrupted")):
+                import document_engine
+                result = document_engine.load_document_by_extension(path)
+            self.assertEqual(result, [])
+        finally:
+            os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# query_documents entry point
+# ---------------------------------------------------------------------------
+
+class TestQueryDocuments(unittest.TestCase):
+    def _make_stream_output(self, generation="Test answer", docs=None):
+        """Build the sequence of dicts that app.stream would yield."""
+        if docs is None:
+            docs = []
+        return [
+            {"retrieve": {"documents": docs, "question": "q"}},
+            {"grade_documents": {"documents": docs, "question": "q"}},
+            {"generate_rag": {"generation": generation, "documents": docs}},
+        ]
+
+    def test_returns_answer_string_by_default(self):
+        import document_engine
+        with patch.object(document_engine, "GLOBAL_VECTORSTORE", MagicMock()):
+            with patch.object(document_engine.app, "stream", return_value=self._make_stream_output("Hello!")):
+                result = document_engine.query_documents("some question")
+        self.assertEqual(result, "Hello!")
+
+    def test_include_sources_returns_dict_with_citations(self):
+        from langchain_core.documents import Document
+        mock_doc = Document(page_content="chunk text", metadata={"source": "/input/lore.pdf", "page": 0})
+        import document_engine
+        with patch.object(document_engine, "GLOBAL_VECTORSTORE", MagicMock()):
+            with patch.object(document_engine.app, "stream",
+                              return_value=self._make_stream_output("Answer", [mock_doc])):
+                result = document_engine.query_documents("some question", include_sources=True)
+        self.assertIsInstance(result, dict)
+        self.assertIn("answer", result)
+        self.assertIn("citations", result)
+        self.assertEqual(result["answer"], "Answer")
+        self.assertEqual(len(result["citations"]), 1)
+        self.assertEqual(result["citations"][0]["file"], "lore.pdf")
+        self.assertEqual(result["citations"][0]["location"], "Page 1")
+
+    def test_returns_error_string_on_exception(self):
+        import document_engine
+        with patch.object(document_engine, "GLOBAL_VECTORSTORE", MagicMock()):
+            with patch.object(document_engine.app, "stream", side_effect=RuntimeError("boom")):
+                result = document_engine.query_documents("some question")
+        self.assertIn("Error", result)
+
+    def test_returns_error_dict_on_exception_with_include_sources(self):
+        import document_engine
+        with patch.object(document_engine, "GLOBAL_VECTORSTORE", MagicMock()):
+            with patch.object(document_engine.app, "stream", side_effect=RuntimeError("boom")):
+                result = document_engine.query_documents("q", include_sources=True)
+        self.assertIsInstance(result, dict)
+        self.assertIn("error", result)
+
+    def test_handles_none_final_state(self):
+        """If the graph stream yields nothing, query_documents should not crash."""
+        import document_engine
+        with patch.object(document_engine, "GLOBAL_VECTORSTORE", MagicMock()):
+            with patch.object(document_engine.app, "stream", return_value=iter([])):
+                result = document_engine.query_documents("q")
+        self.assertEqual(result, "No answer generated.")
+
+    def test_handles_none_final_state_with_include_sources(self):
+        import document_engine
+        with patch.object(document_engine, "GLOBAL_VECTORSTORE", MagicMock()):
+            with patch.object(document_engine.app, "stream", return_value=iter([])):
+                result = document_engine.query_documents("q", include_sources=True)
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["answer"], "No answer generated.")
+        self.assertEqual(result["citations"], [])
+
+    def test_uses_generate_rag_state_over_last_node(self):
+        """generate_rag_state should win even if another node outputs last (edge case)."""
+        import document_engine
+        # Simulate: generate_rag fires, then some extra bookkeeping node fires after
+        stream_output = [
+            {"retrieve": {"documents": [], "question": "q"}},
+            {"generate_rag": {"generation": "Correct answer", "documents": []}},
+            {"some_other_node": {"documents": [], "question": "q"}},  # last node, wrong state
+        ]
+        with patch.object(document_engine, "GLOBAL_VECTORSTORE", MagicMock()):
+            with patch.object(document_engine.app, "stream", return_value=iter(stream_output)):
+                result = document_engine.query_documents("q")
+        self.assertEqual(result, "Correct answer")
+
+    def test_initializes_vectorstore_if_none(self):
+        import document_engine
+        with patch.object(document_engine, "GLOBAL_VECTORSTORE", None):
+            with patch.object(document_engine, "initialize_vectorstore") as mock_init:
+                with patch.object(document_engine.app, "stream",
+                                  return_value=self._make_stream_output("ok")):
+                    document_engine.query_documents("q")
+        mock_init.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# trigger_reindex
+# ---------------------------------------------------------------------------
+
+class TestTriggerReindex(unittest.TestCase):
+    def test_queues_supported_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # Create a mix of supported and unsupported files
+            for name in ["doc.pdf", "notes.txt", "data.xlsx", "ignore.exe", "~$tmp.docx"]:
+                open(os.path.join(tmp, name), "w").close()
+
+            import document_engine
+            orig_folder = document_engine.DOC_FOLDER
+            document_engine.DOC_FOLDER = tmp
+            try:
+                count = document_engine.trigger_reindex()
+            finally:
+                document_engine.DOC_FOLDER = orig_folder
+
+        # Only doc.pdf, notes.txt, data.xlsx should be queued (not .exe or ~$ temp files)
+        self.assertEqual(count, 3)
+
+    def test_returns_zero_for_empty_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            import document_engine
+            orig_folder = document_engine.DOC_FOLDER
+            document_engine.DOC_FOLDER = tmp
+            try:
+                count = document_engine.trigger_reindex()
+            finally:
+                document_engine.DOC_FOLDER = orig_folder
+        self.assertEqual(count, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
