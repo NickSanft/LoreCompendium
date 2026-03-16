@@ -394,5 +394,113 @@ class TestTriggerReindex(unittest.TestCase):
         self.assertEqual(count, 0)
 
 
+# ---------------------------------------------------------------------------
+# Embeddings cache
+# ---------------------------------------------------------------------------
+
+class TestGetEmbeddings(unittest.TestCase):
+    def setUp(self):
+        import document_engine
+        self._orig = document_engine._EMBEDDINGS
+        document_engine._EMBEDDINGS = None
+
+    def tearDown(self):
+        import document_engine
+        document_engine._EMBEDDINGS = self._orig
+
+    def test_returns_ollama_embeddings_instance(self):
+        from langchain_ollama import OllamaEmbeddings
+        import document_engine
+        result = document_engine._get_embeddings()
+        self.assertIsInstance(result, OllamaEmbeddings)
+
+    def test_returns_same_instance_on_second_call(self):
+        import document_engine
+        first = document_engine._get_embeddings()
+        second = document_engine._get_embeddings()
+        self.assertIs(first, second)
+
+    def test_cached_instance_not_recreated(self):
+        import document_engine
+        mock_embed = MagicMock()
+        document_engine._EMBEDDINGS = mock_embed
+        result = document_engine._get_embeddings()
+        self.assertIs(result, mock_embed)
+
+
+# ---------------------------------------------------------------------------
+# Retrieval k value
+# ---------------------------------------------------------------------------
+
+class TestRetrieveUsesK4(unittest.TestCase):
+    def test_retrieve_calls_get_retriever_with_k4(self):
+        import document_engine
+        captured = {}
+
+        def fake_get_retriever(k=4):
+            captured["k"] = k
+            mock_retriever = MagicMock()
+            mock_retriever.invoke.return_value = []
+            return mock_retriever
+
+        with patch.object(document_engine, "get_retriever", side_effect=fake_get_retriever):
+            document_engine.retrieve({"question": "test", "documents": [], "loop_step": 0})
+
+        self.assertEqual(captured.get("k"), 4)
+
+
+# ---------------------------------------------------------------------------
+# Shutdown
+# ---------------------------------------------------------------------------
+
+class TestShutdown(unittest.TestCase):
+    def test_shutdown_puts_sentinel_in_queue(self):
+        import document_engine
+        # Drain any leftover items queued by earlier tests
+        while not document_engine.INGESTION_QUEUE.empty():
+            try:
+                document_engine.INGESTION_QUEUE.get_nowait()
+            except Exception:
+                break
+        orig_observer = document_engine._OBSERVER
+        document_engine._OBSERVER = None
+        try:
+            document_engine.shutdown()
+            sentinel = document_engine.INGESTION_QUEUE.get_nowait()
+            self.assertIsNone(sentinel)
+        finally:
+            document_engine._OBSERVER = orig_observer
+
+    def test_shutdown_stops_observer_if_running(self):
+        import document_engine
+        mock_observer = MagicMock()
+        orig = document_engine._OBSERVER
+        document_engine._OBSERVER = mock_observer
+        try:
+            document_engine.shutdown()
+        finally:
+            document_engine._OBSERVER = orig
+            # Drain sentinel so other tests are not affected
+            try:
+                document_engine.INGESTION_QUEUE.get_nowait()
+            except Exception:
+                pass
+        mock_observer.stop.assert_called_once()
+        mock_observer.join.assert_called_once()
+
+    def test_shutdown_safe_when_observer_is_none(self):
+        import document_engine
+        orig = document_engine._OBSERVER
+        document_engine._OBSERVER = None
+        try:
+            document_engine.shutdown()  # Should not raise
+        finally:
+            document_engine._OBSERVER = orig
+            try:
+                document_engine.INGESTION_QUEUE.get_nowait()
+            except Exception:
+                pass
+
+
 if __name__ == "__main__":
     unittest.main()
