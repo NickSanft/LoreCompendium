@@ -44,6 +44,17 @@ INGESTION_QUEUE = queue.Queue()
 MANIFEST_LOCK = threading.Lock()
 INDEXED_FILES_PATH = os.path.join(CHROMA_DB_PATH, "indexed_files.txt")
 
+_EMBEDDINGS: Optional[OllamaEmbeddings] = None
+_OBSERVER: Optional[Observer] = None
+
+
+def _get_embeddings() -> OllamaEmbeddings:
+    """Returns the shared OllamaEmbeddings instance, creating it once on first call."""
+    global _EMBEDDINGS
+    if _EMBEDDINGS is None:
+        _EMBEDDINGS = OllamaEmbeddings(model=EMBEDDING_MODEL)
+    return _EMBEDDINGS
+
 
 def load_pdf(file_path: str) -> List[Document]:
     loader = PyPDFLoader(file_path)
@@ -172,8 +183,12 @@ def ingestion_worker():
 
     while True:
         try:
-            # Block until an item is available
-            action, file_path = INGESTION_QUEUE.get()
+            # Block until an item is available; None is the shutdown sentinel
+            item = INGESTION_QUEUE.get()
+            if item is None:
+                INGESTION_QUEUE.task_done()
+                break
+            action, file_path = item
 
             # Wait briefly to let file writes settle (debounce)
             time.sleep(1.0)
@@ -228,9 +243,9 @@ def initialize_vectorstore():
     Ingests documents using Multiprocessing and returns the VectorStore.
     Also starts the background Watchdog observer.
     """
-    global GLOBAL_VECTORSTORE
+    global GLOBAL_VECTORSTORE, _OBSERVER
 
-    embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL)
+    embeddings = _get_embeddings()
 
     # Ensure directories exist
     if not os.path.exists(DOC_FOLDER):
@@ -338,11 +353,20 @@ def initialize_vectorstore():
 
     # Start Observer
     event_handler = DocumentEventHandler()
-    observer = Observer()
-    observer.schedule(event_handler, DOC_FOLDER, recursive=True)
-    observer.start()
+    _OBSERVER = Observer()
+    _OBSERVER.schedule(event_handler, DOC_FOLDER, recursive=True)
+    _OBSERVER.start()
 
     return vectorstore
+
+
+def shutdown() -> None:
+    """Stop the ingestion worker and watchdog observer cleanly."""
+    INGESTION_QUEUE.put(None)  # sentinel tells the worker to exit
+    if _OBSERVER is not None:
+        _OBSERVER.stop()
+        _OBSERVER.join()
+    print("--- DOCUMENT ENGINE SHUTDOWN COMPLETE ---")
 
 
 def get_indexed_files() -> dict:
@@ -441,7 +465,7 @@ def retrieve(state):
     question = state["question"]
 
     # Always fetch a fresh retriever instance to ensure it sees latest DB updates
-    retriever = get_retriever(k=2)
+    retriever = get_retriever(k=4)
 
     documents = retriever.invoke(question)
     return {"documents": documents, "question": question}
