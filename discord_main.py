@@ -1,7 +1,9 @@
 import asyncio
 import logging
+import queue
 import sys
 import time
+from datetime import datetime
 import discord
 import os
 from discord import app_commands
@@ -10,7 +12,7 @@ from discord.ext import commands
 from conversation import ask_stuff
 from document_engine import (
     query_documents, query_documents_scoped, initialize_vectorstore,
-    get_indexed_files, get_duplicate_source, trigger_reindex,
+    get_indexed_files, get_chunk_counts, get_duplicate_source, trigger_reindex,
 )
 from lore_utils import (
     get_key_from_json_config_file, MessageSource, DOC_FOLDER,
@@ -41,6 +43,69 @@ def _validate_query(query: str) -> str | None:
     if len(query) > _MAX_QUERY_LENGTH:
         return f"Query is too long ({len(query)} chars). Please keep it under {_MAX_QUERY_LENGTH} characters."
     return None
+
+
+_STREAM_EDIT_INTERVAL = 0.8  # minimum seconds between Discord message edits while streaming
+
+
+def _fmt_size(n_bytes: int) -> str:
+    """Format a byte count as a human-readable string (e.g. 1.4 MB)."""
+    for unit in ("B", "KB", "MB", "GB"):
+        if abs(n_bytes) < 1024:
+            return f"{n_bytes:.0f} {unit}"
+        n_bytes /= 1024  # type: ignore[assignment]
+    return f"{n_bytes:.1f} TB"
+
+
+async def _stream_to_interaction(
+    interaction: discord.Interaction,
+    stream_q: queue.Queue,
+    query_task: asyncio.Task,
+) -> None:
+    """Drain stream_q and progressively edit the deferred interaction response.
+
+    Edits are throttled to _STREAM_EDIT_INTERVAL seconds to stay within Discord
+    rate limits. A blinking cursor (▌) is appended during generation and removed
+    on the final edit. Returns once the generator sentinel (None) is received or
+    the backing task finishes unexpectedly.
+    """
+    accumulated = ""
+    last_edit = 0.0
+
+    while True:
+        # Drain all currently available chunks without blocking
+        got_chunk = False
+        while True:
+            try:
+                chunk = stream_q.get_nowait()
+            except queue.Empty:
+                break
+            if chunk is None:  # sentinel — generation finished
+                if accumulated:
+                    try:
+                        await interaction.edit_original_response(content=accumulated[-1950:])
+                    except Exception:
+                        pass
+                return
+            accumulated += chunk
+            got_chunk = True
+
+        # If the task died before sending the sentinel, stop waiting
+        if query_task.done() and stream_q.empty():
+            return
+
+        # Throttled intermediate edit with a cursor so the user sees progress
+        if got_chunk and accumulated:
+            now = time.monotonic()
+            if now - last_edit >= _STREAM_EDIT_INTERVAL:
+                try:
+                    preview = accumulated[-1950:] if len(accumulated) > 1950 else accumulated
+                    await interaction.edit_original_response(content=preview + " ▌")
+                    last_edit = now
+                except Exception:
+                    pass
+
+        await asyncio.sleep(0.05)
 
 
 def _classify_error(e: Exception) -> str:
@@ -98,8 +163,15 @@ async def lore_slash(interaction: discord.Interaction, query: str):
 
     logger.info(f"Slash lore request from {interaction.user}: {query}")
     await interaction.response.defer(thinking=True)
+
+    stream_q: queue.Queue = queue.Queue()
+    query_task = asyncio.ensure_future(
+        asyncio.to_thread(query_documents, query, stream_queue=stream_q)
+    )
+    await _stream_to_interaction(interaction, stream_q, query_task)
+
     try:
-        response = await asyncio.to_thread(query_documents, query)
+        response = await query_task
     except Exception as e:
         logger.error(f"Lore query error: {e}")
         response = _classify_error(e)
@@ -122,8 +194,15 @@ async def ask_slash(interaction: discord.Interaction, filename: str, query: str)
 
     logger.info(f"Scoped query from {interaction.user}: file='{filename}', query='{query}'")
     await interaction.response.defer(thinking=True)
+
+    stream_q: queue.Queue = queue.Queue()
+    query_task = asyncio.ensure_future(
+        asyncio.to_thread(query_documents_scoped, query, filename, stream_queue=stream_q)
+    )
+    await _stream_to_interaction(interaction, stream_q, query_task)
+
     try:
-        response = await asyncio.to_thread(query_documents_scoped, query, filename)
+        response = await query_task
     except Exception as e:
         logger.error(f"Scoped query error: {e}")
         response = _classify_error(e)
@@ -161,13 +240,23 @@ async def help_slash(interaction: discord.Interaction):
 
 @client.tree.command(name="status", description="Show which documents are currently indexed")
 async def status_slash(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     indexed = get_indexed_files()
     if not indexed:
         msg = "No documents are currently indexed. Add files to the `input` folder or drag and drop them here."
     else:
-        file_list = "\n".join(f"• `{os.path.basename(p)}`" for p in indexed)
-        msg = f"**{len(indexed)} document(s) indexed:**\n{file_list}"
-    await interaction.response.send_message(msg, ephemeral=True)
+        chunk_counts = await asyncio.to_thread(get_chunk_counts)
+        lines = [f"**{len(indexed)} document(s) indexed:**\n"]
+        for path, sig in sorted(indexed.items(), key=lambda x: os.path.basename(x[0]).lower()):
+            name = os.path.basename(path)
+            size_str = _fmt_size(int(sig["size"])) if isinstance(sig.get("size"), (int, float)) else "?"
+            mtime = sig.get("mtime")
+            ts = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M") if mtime else "unknown"
+            chunks = chunk_counts.get(path, 0)
+            chunk_str = f"{chunks} chunk{'s' if chunks != 1 else ''}"
+            lines.append(f"• `{name}` — {size_str} · {chunk_str} · indexed {ts}")
+        msg = "\n".join(lines)
+    await interaction.followup.send(msg, ephemeral=True)
 
 
 @client.tree.command(name="reindex", description="Force a re-scan of the input folder for new or changed documents")

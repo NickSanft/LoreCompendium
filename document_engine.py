@@ -395,8 +395,25 @@ def shutdown() -> None:
 
 
 def get_indexed_files() -> dict:
-    """Returns the index manifest. Keys are file paths, values are {mtime, size} dicts."""
+    """Returns the index manifest. Keys are file paths, values are {mtime, size, hash} dicts."""
     return _load_index_manifest()
+
+
+def get_chunk_counts() -> dict[str, int]:
+    """Returns {file_path: chunk_count} by reading ChromaDB metadata in one call."""
+    if GLOBAL_VECTORSTORE is None:
+        return {}
+    try:
+        results = GLOBAL_VECTORSTORE.get(include=["metadatas"])
+        counts: dict[str, int] = {}
+        for meta in results.get("metadatas", []):
+            source = meta.get("source", "")
+            if source:
+                counts[source] = counts.get(source, 0) + 1
+        return counts
+    except Exception as e:
+        logger.warning(f"Could not fetch chunk counts: {e}")
+        return {}
 
 
 def trigger_reindex() -> int:
@@ -493,7 +510,8 @@ class GraphState(TypedDict):
     generation: str
     documents: List[Document]
     loop_step: int
-    scoped_source: NotRequired[Optional[str]]  # None = search all documents
+    scoped_source: NotRequired[Optional[str]]         # None = search all documents
+    stream_queue: NotRequired[Optional[queue.Queue]]  # queue for live token streaming
 
 
 def retrieve(state):
@@ -555,6 +573,8 @@ def generate_rag(state):
 
     full_context_string = "\n\n---\n\n".join(formatted_context_list)
 
+    sq: Optional[queue.Queue] = state.get("stream_queue")
+
     logger.debug(
         f"[GENERATE] → {THINKING_OLLAMA_MODEL}"
         f"\n  question : {question!r}"
@@ -565,6 +585,10 @@ def generate_rag(state):
     generation = ""
     for chunk in rag_chain.stream({"context": full_context_string, "question": question}):
         generation += chunk
+        if sq is not None:
+            sq.put(chunk)
+    if sq is not None:
+        sq.put(None)  # sentinel — signals streaming is complete
 
     logger.debug(f"[GENERATE] ← response:\n{generation}")
     return {"generation": generation, "documents": documents}
@@ -658,20 +682,26 @@ def _run_rag_graph(inputs: dict, include_sources: bool):
     return final_answer
 
 
-def query_documents(user_input: str, include_sources: bool = False):
+def query_documents(user_input: str, include_sources: bool = False,
+                    stream_queue: Optional[queue.Queue] = None):
     """Search all indexed documents and return an answer."""
     if GLOBAL_VECTORSTORE is None:
         initialize_vectorstore()
-    return _run_rag_graph({"question": user_input, "loop_step": 0}, include_sources)
+    inputs: dict = {"question": user_input, "loop_step": 0}
+    if stream_queue is not None:
+        inputs["stream_queue"] = stream_queue
+    return _run_rag_graph(inputs, include_sources)
 
 
-def query_documents_scoped(user_input: str, filename: str, include_sources: bool = False):
+def query_documents_scoped(user_input: str, filename: str, include_sources: bool = False,
+                           stream_queue: Optional[queue.Queue] = None):
     """Search within a single named document and return an answer.
 
     Args:
         user_input: The user's question.
         filename: The basename of the indexed file to restrict the search to.
         include_sources: If True, return a dict with 'answer' and 'citations'.
+        stream_queue: Optional queue that receives token chunks as they are generated.
     """
     if GLOBAL_VECTORSTORE is None:
         initialize_vectorstore()
@@ -682,7 +712,9 @@ def query_documents_scoped(user_input: str, filename: str, include_sources: bool
         msg = f"No indexed document named '{filename}' found. Use `/status` to see available documents."
         return {"answer": msg, "citations": []} if include_sources else msg
 
-    inputs = {"question": user_input, "loop_step": 0, "scoped_source": matching[0]}
+    inputs: dict = {"question": user_input, "loop_step": 0, "scoped_source": matching[0]}
+    if stream_queue is not None:
+        inputs["stream_queue"] = stream_queue
     return _run_rag_graph(inputs, include_sources)
 
 

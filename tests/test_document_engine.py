@@ -395,6 +395,104 @@ class TestTriggerReindex(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Streaming via queue
+# ---------------------------------------------------------------------------
+
+class TestStreamingQueue(unittest.TestCase):
+    def _make_stream_output(self, chunks: list[str]):
+        """Build app.stream output that simulates the generate_rag node."""
+        from langchain_core.documents import Document
+        doc = Document(page_content="text", metadata={"source": "/input/f.txt", "start_index": 0})
+        # Simulate retrieve → grade → generate_rag
+        return [
+            {"retrieve": {"documents": [doc], "question": "q"}},
+            {"grade_documents": {"documents": [doc], "question": "q"}},
+            # generate_rag node returns the assembled generation; the queue is
+            # filled inside generate_rag itself — we test via a real call below
+            {"generate_rag": {"generation": "".join(chunks), "documents": [doc]}},
+        ]
+
+    def test_query_documents_puts_chunks_in_queue(self):
+        """Token chunks and the None sentinel should appear in the stream_queue."""
+        import document_engine
+        import queue as q_module
+        from langchain_core.documents import Document
+
+        sq = q_module.Queue()
+        doc = Document(page_content="test content", metadata={"source": "/input/f.txt", "start_index": 0})
+        state = {"question": "q", "documents": [doc], "stream_queue": sq}
+
+        # Replace the module-level rag_chain with a mock (avoids Pydantic attr restrictions)
+        mock_chain = MagicMock()
+        mock_chain.stream.return_value = iter(["Hello ", "world"])
+        with patch.object(document_engine, "rag_chain", mock_chain):
+            document_engine.generate_rag(state)
+
+        items = []
+        while not sq.empty():
+            items.append(sq.get_nowait())
+        self.assertIn("Hello ", items)
+        self.assertIn("world", items)
+        self.assertIn(None, items)
+
+    def test_stream_queue_none_does_not_break_query(self):
+        """Passing no stream_queue should still return a normal answer string."""
+        import document_engine
+        with patch.object(document_engine, "GLOBAL_VECTORSTORE", MagicMock()):
+            with patch.object(document_engine.app, "stream",
+                              return_value=iter(self._make_stream_output(["ok"]))):
+                result = document_engine.query_documents("q")
+        self.assertIsInstance(result, str)
+
+
+# ---------------------------------------------------------------------------
+# Chunk counts
+# ---------------------------------------------------------------------------
+
+class TestGetChunkCounts(unittest.TestCase):
+    def test_returns_empty_when_vectorstore_is_none(self):
+        import document_engine
+        orig = document_engine.GLOBAL_VECTORSTORE
+        document_engine.GLOBAL_VECTORSTORE = None
+        try:
+            result = document_engine.get_chunk_counts()
+        finally:
+            document_engine.GLOBAL_VECTORSTORE = orig
+        self.assertEqual(result, {})
+
+    def test_counts_chunks_per_source(self):
+        import document_engine
+        mock_vs = MagicMock()
+        mock_vs.get.return_value = {
+            "metadatas": [
+                {"source": "/input/a.txt"},
+                {"source": "/input/a.txt"},
+                {"source": "/input/b.pdf"},
+            ]
+        }
+        orig = document_engine.GLOBAL_VECTORSTORE
+        document_engine.GLOBAL_VECTORSTORE = mock_vs
+        try:
+            result = document_engine.get_chunk_counts()
+        finally:
+            document_engine.GLOBAL_VECTORSTORE = orig
+        self.assertEqual(result["/input/a.txt"], 2)
+        self.assertEqual(result["/input/b.pdf"], 1)
+
+    def test_handles_vectorstore_exception_gracefully(self):
+        import document_engine
+        mock_vs = MagicMock()
+        mock_vs.get.side_effect = RuntimeError("db error")
+        orig = document_engine.GLOBAL_VECTORSTORE
+        document_engine.GLOBAL_VECTORSTORE = mock_vs
+        try:
+            result = document_engine.get_chunk_counts()
+        finally:
+            document_engine.GLOBAL_VECTORSTORE = orig
+        self.assertEqual(result, {})
+
+
+# ---------------------------------------------------------------------------
 # Content-hash duplicate detection
 # ---------------------------------------------------------------------------
 

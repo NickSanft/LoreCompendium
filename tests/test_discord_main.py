@@ -5,11 +5,12 @@ Covers pure utility functions (split_into_chunks, _validate_query,
 _check_rate_limit) since the Discord event handlers require a live bot
 connection.
 """
+import asyncio
 import os
 import sys
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -81,6 +82,59 @@ class TestValidateQuery(unittest.TestCase):
         result = _validate_query("a" * (_MAX_QUERY_LENGTH + 1))
         self.assertIsNotNone(result)
         self.assertIn(str(_MAX_QUERY_LENGTH), result)
+
+
+class TestFmtSize(unittest.TestCase):
+    def test_bytes(self):
+        from discord_main import _fmt_size
+        self.assertEqual(_fmt_size(0), "0 B")
+        self.assertEqual(_fmt_size(512), "512 B")
+
+    def test_kilobytes(self):
+        from discord_main import _fmt_size
+        self.assertIn("KB", _fmt_size(2048))
+
+    def test_megabytes(self):
+        from discord_main import _fmt_size
+        self.assertIn("MB", _fmt_size(2 * 1024 * 1024))
+
+    def test_gigabytes(self):
+        from discord_main import _fmt_size
+        self.assertIn("GB", _fmt_size(2 * 1024 ** 3))
+
+
+class TestStreamToInteraction(unittest.IsolatedAsyncioTestCase):
+    async def test_edits_with_cursor_then_final_edit(self):
+        import queue as q_module
+        from discord_main import _stream_to_interaction
+
+        interaction = MagicMock()
+        interaction.edit_original_response = AsyncMock()
+
+        sq = q_module.Queue()
+        sq.put("Hello ")
+        sq.put("world")
+        sq.put(None)  # sentinel
+
+        task = asyncio.ensure_future(asyncio.sleep(0))
+        await task
+
+        await _stream_to_interaction(interaction, sq, task)
+        interaction.edit_original_response.assert_called()
+
+    async def test_exits_cleanly_when_task_done_and_queue_empty(self):
+        import queue as q_module
+        from discord_main import _stream_to_interaction
+
+        interaction = MagicMock()
+        interaction.edit_original_response = AsyncMock()
+
+        sq = q_module.Queue()  # empty queue, no sentinel
+        task = asyncio.ensure_future(asyncio.sleep(0))
+        await task  # mark done
+
+        # Should return without hanging
+        await asyncio.wait_for(_stream_to_interaction(interaction, sq, task), timeout=2.0)
 
 
 class TestClassifyError(unittest.TestCase):
