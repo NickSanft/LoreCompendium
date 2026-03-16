@@ -83,6 +83,29 @@ class TestValidateQuery(unittest.TestCase):
         self.assertIn(str(_MAX_QUERY_LENGTH), result)
 
 
+class TestClassifyError(unittest.TestCase):
+    def test_connection_error_mentions_ollama(self):
+        from discord_main import _classify_error
+        result = _classify_error(ConnectionRefusedError("connection refused"))
+        self.assertIn("Ollama", result)
+
+    def test_timeout_error_mentions_ollama(self):
+        from discord_main import _classify_error
+        result = _classify_error(TimeoutError("timeout"))
+        self.assertIn("Ollama", result)
+
+    def test_generic_error_gives_fallback_message(self):
+        from discord_main import _classify_error
+        result = _classify_error(RuntimeError("something else entirely"))
+        self.assertIsInstance(result, str)
+        self.assertGreater(len(result), 0)
+
+    def test_connection_string_in_message_triggers_ollama_hint(self):
+        from discord_main import _classify_error
+        result = _classify_error(RuntimeError("cannot reach connection endpoint"))
+        self.assertIn("Ollama", result)
+
+
 class TestCheckRateLimit(unittest.TestCase):
     def setUp(self):
         import discord_main
