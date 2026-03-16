@@ -16,3 +16,5 @@ typing-extensions
 unstructured
 python-docx
 pypdf
+
+pytest
