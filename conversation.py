@@ -1,3 +1,4 @@
+import logging
 import re
 
 from langchain_core.runnables import RunnableConfig
@@ -11,7 +12,10 @@ from langgraph.prebuilt import create_react_agent
 import document_engine
 from lore_utils import MessageSource, SYSTEM_DESCRIPTION, THINKING_OLLAMA_MODEL
 
+logger = logging.getLogger(__name__)
+
 CONVERSATION_NODE = "conversation"
+MAX_HISTORY_MESSAGES = 20  # retain the last ~10 exchanges to cap memory growth
 
 
 def get_system_description():
@@ -55,11 +59,18 @@ def get_config_values(config: RunnableConfig) -> RunnableConfig:
 
 
 def conversation(state: MessagesState, config: RunnableConfig):
-    messages = state["messages"]
-    print(f"Latest message: {messages[-1].content if messages else ''}")
+    messages = list(state["messages"])
+
+    # Trim history to prevent unbounded memory growth (~10 exchanges)
+    if len(messages) > MAX_HISTORY_MESSAGES:
+        messages = messages[-MAX_HISTORY_MESSAGES:]
+
+    logger.debug(f"History length: {len(messages)} messages")
+    if messages:
+        logger.debug(f"Latest message: {messages[-1].content if hasattr(messages[-1], 'content') else messages[-1]}")
 
     # Pass the full accumulated history so the inner agent has conversation context
-    inputs = {"messages": [("system", get_system_description())] + list(messages)}
+    inputs = {"messages": [("system", get_system_description())] + messages}
 
     final_state = None
 
@@ -70,7 +81,7 @@ def conversation(state: MessagesState, config: RunnableConfig):
         if "messages" in s and s["messages"]:
             latest = s["messages"][-1]
             if hasattr(latest, 'tool_calls') and latest.tool_calls:
-                print(f"Detected tool calls: {[tc.get('name', '') for tc in latest.tool_calls]}")
+                logger.debug(f"Tool calls: {[tc.get('name', '') for tc in latest.tool_calls]}")
 
     resp = final_state["messages"][-1].content if final_state and "messages" in final_state else ""
     return {'messages': [resp]}

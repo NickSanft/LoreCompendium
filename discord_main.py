@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import sys
 import time
 import discord
@@ -7,8 +8,16 @@ from discord import app_commands
 from discord.ext import commands
 
 from conversation import ask_stuff
-from document_engine import query_documents, initialize_vectorstore, get_indexed_files, trigger_reindex
-from lore_utils import get_key_from_json_config_file, MessageSource, DOC_FOLDER, SUPPORTED_EXTENSIONS, check_ollama_health
+from document_engine import (
+    query_documents, query_documents_scoped, initialize_vectorstore,
+    get_indexed_files, get_duplicate_source, trigger_reindex,
+)
+from lore_utils import (
+    get_key_from_json_config_file, MessageSource, DOC_FOLDER,
+    SUPPORTED_EXTENSIONS, check_ollama_health, setup_logging,
+)
+
+logger = logging.getLogger(__name__)
 
 _RATE_LIMIT_SECONDS = 10
 _MAX_QUERY_LENGTH = 500
@@ -34,6 +43,14 @@ def _validate_query(query: str) -> str | None:
     return None
 
 
+def _classify_error(e: Exception) -> str:
+    """Convert a raw exception into a user-facing error message."""
+    msg = str(e).lower()
+    if "connection" in msg or "refused" in msg or "timeout" in msg:
+        return "⚠️ Cannot reach the Ollama service. Make sure it is running (`ollama serve`)."
+    return "⚠️ Something went wrong while processing your request. Please try again."
+
+
 command_prefix = "$"
 intents = discord.Intents.default()
 intents.message_content = True
@@ -44,26 +61,25 @@ async def _startup_init():
     """Initialize the vectorstore in the background so the bot is ready for queries."""
     try:
         await asyncio.to_thread(initialize_vectorstore)
-        print("Vectorstore initialized and ready.")
+        logger.info("Vectorstore initialized and ready.")
     except Exception as e:
-        print(f"Failed to initialize vectorstore on startup: {e}")
+        logger.error(f"Failed to initialize vectorstore on startup: {e}")
 
 
 @client.event
 async def on_ready():
-    print("Logged in as ", client.user)
+    logger.info(f"Logged in as {client.user}")
     if not os.path.exists(DOC_FOLDER):
         os.makedirs("input")
-        print("Created 'input' directory.")
+        logger.info("Created 'input' directory.")
 
     asyncio.create_task(_startup_init())
 
     try:
-        # This registers the slash commands with Discord
         synced = await client.tree.sync()
-        print(f"Synced {len(synced)} command(s)")
+        logger.info(f"Synced {len(synced)} command(s)")
     except Exception as e:
-        print(f"Failed to sync commands: {e}")
+        logger.error(f"Failed to sync commands: {e}")
 
 
 @client.tree.command(name="lore", description="Search your documents for an answer")
@@ -80,13 +96,49 @@ async def lore_slash(interaction: discord.Interaction, query: str):
             f"Please wait {remaining:.1f}s before sending another query.", ephemeral=True)
         return
 
-    print(f"Slash Lore request: {query}")
+    logger.info(f"Slash lore request from {interaction.user}: {query}")
     await interaction.response.defer(thinking=True)
     try:
         response = await asyncio.to_thread(query_documents, query)
     except Exception as e:
-        response = f"An error occurred while searching: {e}"
+        logger.error(f"Lore query error: {e}")
+        response = _classify_error(e)
     await chunk_and_send(ctx=None, original_message=None, original_response=response, interaction=interaction)
+
+
+@client.tree.command(name="ask", description="Search within a specific document")
+@app_commands.describe(filename="The document to search in", query="Your question")
+async def ask_slash(interaction: discord.Interaction, filename: str, query: str):
+    error = _validate_query(query)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return
+
+    remaining = _check_rate_limit(str(interaction.user.id))
+    if remaining > 0:
+        await interaction.response.send_message(
+            f"Please wait {remaining:.1f}s before sending another query.", ephemeral=True)
+        return
+
+    logger.info(f"Scoped query from {interaction.user}: file='{filename}', query='{query}'")
+    await interaction.response.defer(thinking=True)
+    try:
+        response = await asyncio.to_thread(query_documents_scoped, query, filename)
+    except Exception as e:
+        logger.error(f"Scoped query error: {e}")
+        response = _classify_error(e)
+    await chunk_and_send(ctx=None, original_message=None, original_response=response, interaction=interaction)
+
+
+@ask_slash.autocomplete("filename")
+async def ask_filename_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    """Populate filename choices from the live index manifest as the user types."""
+    indexed = get_indexed_files()
+    filenames = sorted({os.path.basename(p) for p in indexed})
+    matches = [f for f in filenames if current.lower() in f.lower()]
+    return [app_commands.Choice(name=f, value=f) for f in matches[:25]]
 
 
 @client.tree.command(name="help", description="Show available bot commands")
@@ -94,7 +146,8 @@ async def help_slash(interaction: discord.Interaction):
     supported = ", ".join(SUPPORTED_EXTENSIONS)
     help_text = (
         "**Lore Compendium Commands**\n\n"
-        "`/lore <query>` — Search your indexed documents for an answer\n"
+        "`/lore <query>` — Search all indexed documents for an answer\n"
+        "`/ask <filename> <query>` — Search within a specific document (filename autocompletes)\n"
         "`/status` — Show which documents are currently indexed\n"
         "`/reindex` — Force a re-scan of the input folder\n"
         "`/help` — Show this message\n\n"
@@ -138,18 +191,38 @@ async def on_message(message: discord.Message):
 
     if message.attachments:
         saved_count = 0
+        notices: list[str] = []
         for attachment in message.attachments:
             ext = os.path.splitext(attachment.filename)[1].lower()
             if ext in SUPPORTED_EXTENSIONS:
                 save_path = os.path.join(DOC_FOLDER, attachment.filename)
-                await attachment.save(save_path)
-                print(f"Saved file: {save_path}")
+                is_update = os.path.exists(save_path)
+                try:
+                    await attachment.save(save_path)
+                except Exception as e:
+                    logger.error(f"Failed to save {attachment.filename}: {e}")
+                    notices.append(f"⚠️ Failed to save `{attachment.filename}`: {e}")
+                    continue
+
+                # Detect content-identical files already indexed under a different name
+                duplicate = get_duplicate_source(save_path)
+                if duplicate and duplicate != attachment.filename:
+                    notices.append(
+                        f"⚠️ `{attachment.filename}` appears to be a duplicate of already-indexed `{duplicate}`."
+                    )
+                elif is_update:
+                    notices.append(f"🔄 Updated existing file `{attachment.filename}`.")
+
+                logger.info(f"Saved {'updated' if is_update else 'new'} file: {save_path}")
                 saved_count += 1
 
-        # If we saved files, let the user know and stop processing (don't treat it as a question)
-        if saved_count > 0:
-            await message.channel.send(
-                f"📥 **Received!** Saved {saved_count} document(s) to the `input` folder.\n*If you have live-sync enabled, these will be indexed shortly.*")
+        if saved_count > 0 or notices:
+            lines = [f"📥 **Received!** Saved {saved_count} document(s) to the `input` folder."]
+            if notices:
+                lines.extend(notices)
+            else:
+                lines.append("*These will be indexed shortly.*")
+            await message.channel.send("\n".join(lines))
             return
 
     # Handle Conversational/DM Logic
@@ -173,7 +246,7 @@ async def on_message(message: discord.Message):
         await message.channel.send(f"Please wait {remaining:.1f}s before sending another message.")
         return
 
-    print("Lore request: ", message_clean)
+    logger.info(f"Conversational request from {author}: {message_clean}")
 
     original_message = await message.channel.send(
         "This may take a few seconds, please wait. This message will be updated with the result!")
@@ -182,7 +255,8 @@ async def on_message(message: discord.Message):
         async with message.channel.typing():
             original_response = await asyncio.to_thread(ask_stuff, message_clean, author, MessageSource.DISCORD_TEXT)
     except Exception as e:
-        original_response = f"An error occurred: {e}"
+        logger.error(f"Conversation error: {e}")
+        original_response = _classify_error(e)
 
     await chunk_and_send(message.channel, original_message, original_response)
 
@@ -231,15 +305,16 @@ def split_into_chunks(s, chunk_size=2000):
 
 
 if __name__ == '__main__':
-    print("Running pre-flight checks...")
+    setup_logging()
+    logger.info("Running pre-flight checks...")
     errors = check_ollama_health()
     if errors:
-        print("\n[ERROR] Pre-flight checks failed:")
+        logger.error("Pre-flight checks failed:")
         for err in errors:
-            print(err)
-        print("\nFix the above issues and restart the bot.")
+            logger.error(err)
+        logger.error("Fix the above issues and restart the bot.")
         sys.exit(1)
-    print("[OK] Ollama is running and all models are available.\n")
+    logger.info("Ollama is running and all models are available.")
 
     discord_secret = get_key_from_json_config_file("discord_bot_token", "")
     client.run(discord_secret)

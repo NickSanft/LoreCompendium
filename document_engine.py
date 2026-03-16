@@ -1,9 +1,11 @@
+import hashlib
+import logging
 import os
 import time
 import queue
 import threading
 import json
-from typing import List, Optional
+from typing import List, NotRequired, Optional
 import msoffcrypto  # noqa
 import openpyxl  # noqa
 import unstructured  # noqa
@@ -37,7 +39,7 @@ from langgraph.graph import END, StateGraph, START
 from lore_utils import CHROMA_COLLECTION_NAME, CHROMA_DB_PATH, THINKING_OLLAMA_MODEL, FAST_OLLAMA_MODEL, \
     EMBEDDING_MODEL, SUPPORTED_EXTENSIONS, DOC_FOLDER
 
-# Define supported file extensions
+logger = logging.getLogger(__name__)
 
 GLOBAL_VECTORSTORE: Optional[Chroma] = None
 INGESTION_QUEUE = queue.Queue()
@@ -89,7 +91,7 @@ def load_document_by_extension(file_path: str) -> List[Document]:
             return loader.load()
         return []
     except Exception as e:
-        print(f"Error loading {file_path}: {e}")
+        logger.error(f"Error loading {file_path}: {e}")
         return []
 
 
@@ -101,34 +103,57 @@ class DocumentEventHandler(FileSystemEventHandler):
 
     def on_created(self, event):
         if not event.is_directory and event.src_path.lower().endswith(SUPPORTED_EXTENSIONS):
-            print(f"[WATCHER] File Created: {event.src_path}")
+            logger.info(f"[WATCHER] File Created: {event.src_path}")
             INGESTION_QUEUE.put(("add", event.src_path))
 
     def on_modified(self, event):
         if not event.is_directory and event.src_path.lower().endswith(SUPPORTED_EXTENSIONS):
-            print(f"[WATCHER] File Modified: {event.src_path}")
+            logger.info(f"[WATCHER] File Modified: {event.src_path}")
             INGESTION_QUEUE.put(("update", event.src_path))
 
     def on_deleted(self, event):
         if not event.is_directory and event.src_path.lower().endswith(SUPPORTED_EXTENSIONS):
-            print(f"[WATCHER] File Deleted: {event.src_path}")
+            logger.info(f"[WATCHER] File Deleted: {event.src_path}")
             INGESTION_QUEUE.put(("delete", event.src_path))
 
     def on_moved(self, event):
         if not event.is_directory:
             if event.src_path.lower().endswith(SUPPORTED_EXTENSIONS):
-                print(f"[WATCHER] File Moved (Delete old): {event.src_path}")
+                logger.info(f"[WATCHER] File Moved (Delete old): {event.src_path}")
                 INGESTION_QUEUE.put(("delete", event.src_path))
             if event.dest_path.lower().endswith(SUPPORTED_EXTENSIONS):
-                print(f"[WATCHER] File Moved (Add new): {event.dest_path}")
+                logger.info(f"[WATCHER] File Moved (Add new): {event.dest_path}")
                 INGESTION_QUEUE.put(("add", event.dest_path))
 
 
 def _get_file_signature(file_path: str) -> dict:
+    hasher = hashlib.md5()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            hasher.update(chunk)
     return {
         "mtime": os.path.getmtime(file_path),
         "size": os.path.getsize(file_path),
+        "hash": hasher.hexdigest(),
     }
+
+
+def get_duplicate_source(file_path: str) -> Optional[str]:
+    """
+    Returns the basename of an already-indexed file whose content is identical
+    to file_path, or None if no duplicate exists.
+    """
+    if not os.path.exists(file_path):
+        return None
+    sig = _get_file_signature(file_path)
+    new_hash = sig.get("hash")
+    manifest = _load_index_manifest()
+    for indexed_path, stored_sig in manifest.items():
+        if indexed_path == file_path:
+            continue
+        if stored_sig.get("hash") == new_hash:
+            return os.path.basename(indexed_path)
+    return None
 
 
 def _load_index_manifest() -> dict:
@@ -144,7 +169,7 @@ def _load_index_manifest() -> dict:
         # Backward compatibility with legacy newline list
         return {line.strip(): {} for line in raw.splitlines() if line.strip()}
     except Exception as e:
-        print(f"Error reading index manifest: {e}")
+        logger.error(f"Error reading index manifest: {e}")
         return {}
 
 
@@ -153,7 +178,7 @@ def _write_index_manifest(manifest: dict) -> None:
         with open(INDEXED_FILES_PATH, "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2)
     except Exception as e:
-        print(f"Error writing index manifest: {e}")
+        logger.error(f"Error writing index manifest: {e}")
 
 
 def _update_manifest(action: str, file_path: str) -> None:
@@ -199,15 +224,15 @@ def ingestion_worker():
 
             base_name = os.path.basename(file_path)
 
-            print(f"--- SYNC WORKER: Processing {action} for {base_name}")
+            logger.info(f"SYNC WORKER: Processing {action} for {base_name}")
 
             if action == "delete":
                 try:
                     GLOBAL_VECTORSTORE.delete(where={"source": file_path})
                     _update_manifest("delete", file_path)
-                    print(f"   - Removed chunks for {base_name}")
+                    logger.info(f"Removed chunks for {base_name}")
                 except Exception as e:
-                    print(f"   - Error deleting {file_path}: {e}")
+                    logger.error(f"Error deleting {file_path}: {e}")
 
             elif action in ["add", "update"]:
                 # For update, we delete first to avoid duplicates
@@ -226,14 +251,14 @@ def ingestion_worker():
                         if splits:
                             GLOBAL_VECTORSTORE.add_documents(splits)
                             _update_manifest("add", file_path)
-                            print(f"   - Added {len(splits)} chunks for {os.path.basename(file_path)}")
+                            logger.info(f"Added {len(splits)} chunks for {os.path.basename(file_path)}")
                 except Exception as e:
-                    print(f"   - Error ingesting {file_path}: {e}")
+                    logger.error(f"Error ingesting {file_path}: {e}")
 
             INGESTION_QUEUE.task_done()
 
         except Exception as e:
-            print(f"Worker error: {e}")
+            logger.error(f"Worker error: {e}")
 
 
 # --- PART 1: OPTIMIZED INGESTION ENGINE ---
@@ -287,22 +312,22 @@ def initialize_vectorstore():
 
     # 3. Parallel Loading & Ingestion
     if deleted_files:
-        print(f"--- DETECTED {len(deleted_files)} DELETED DOCUMENTS ---")
+        logger.info(f"Detected {len(deleted_files)} deleted document(s)")
         for file_path in deleted_files:
             try:
                 vectorstore.delete(where={"source": file_path})
                 _update_manifest("delete", file_path)
-                print(f"   - Removed chunks for {os.path.basename(file_path)}")
+                logger.info(f"Removed chunks for {os.path.basename(file_path)}")
             except Exception as e:
-                print(f"   - Error deleting {file_path}: {e}")
+                logger.error(f"Error deleting {file_path}: {e}")
 
     files_to_ingest = new_files + updated_files
 
     if files_to_ingest:
         if new_files:
-            print(f"--- DETECTED {len(new_files)} NEW DOCUMENTS ---")
+            logger.info(f"Detected {len(new_files)} new document(s)")
         if updated_files:
-            print(f"--- DETECTED {len(updated_files)} UPDATED DOCUMENTS ---")
+            logger.info(f"Detected {len(updated_files)} updated document(s)")
 
         for file_path in updated_files:
             try:
@@ -321,12 +346,12 @@ def initialize_vectorstore():
                 try:
                     loaded_docs = future.result()
                     docs.extend(loaded_docs)
-                    print(f"   [{i + 1}/{len(files_to_ingest)}] Loaded: {os.path.basename(fp)}")
+                    logger.info(f"[{i + 1}/{len(files_to_ingest)}] Loaded: {os.path.basename(fp)}")
                 except Exception as exc:
-                    print(f"   [{i + 1}/{len(files_to_ingest)}] Failed: {fp} generated {exc}")
+                    logger.error(f"[{i + 1}/{len(files_to_ingest)}] Failed: {fp}: {exc}")
 
         if docs:
-            print(f"--- SPLITTING & EMBEDDING {len(docs)} DOCUMENT CHUNKS ---")
+            logger.info(f"Splitting & embedding {len(docs)} document chunk(s)")
             text_splitter = RecursiveCharacterTextSplitter(
                 chunk_size=1000,
                 chunk_overlap=200,
@@ -340,12 +365,12 @@ def initialize_vectorstore():
             # Update index tracking
             for file_path in files_to_ingest:
                 _update_manifest("add", file_path)
-            print("--- INGESTION COMPLETE ---")
+            logger.info("Ingestion complete")
     else:
-        print("--- NO DOCUMENT CHANGES TO INGEST ---")
+        logger.info("No document changes to ingest")
 
     # 4. Start Background Sync (Watchdog)
-    print("--- STARTING LIVE DOC WATCHER ---")
+    logger.info("Starting live document watcher")
 
     # Start Worker Thread
     worker_thread = threading.Thread(target=ingestion_worker, daemon=True)
@@ -366,7 +391,7 @@ def shutdown() -> None:
     if _OBSERVER is not None:
         _OBSERVER.stop()
         _OBSERVER.join()
-    print("--- DOCUMENT ENGINE SHUTDOWN COMPLETE ---")
+    logger.info("Document engine shutdown complete")
 
 
 def get_indexed_files() -> dict:
@@ -390,15 +415,25 @@ def trigger_reindex() -> int:
     return count
 
 
-def get_retriever(k=4):
-    """Returns a retriever interface from the current global vectorstore."""
+def get_retriever(k=4, source_filter: Optional[str] = None):
+    """Returns a retriever interface from the current global vectorstore.
+
+    Args:
+        k: Number of documents to retrieve.
+        source_filter: If provided, restricts results to documents whose
+            ``source`` metadata field matches this full file path.
+    """
     global GLOBAL_VECTORSTORE
     if GLOBAL_VECTORSTORE is None:
         initialize_vectorstore()
 
+    search_kwargs: dict = {"k": k, "fetch_k": 20, "lambda_mult": 0.5}
+    if source_filter:
+        search_kwargs["filter"] = {"source": source_filter}
+
     return GLOBAL_VECTORSTORE.as_retriever(
         search_type="mmr",
-        search_kwargs={"k": k, "fetch_k": 20, "lambda_mult": 0.5}
+        search_kwargs=search_kwargs,
     )
 
 
@@ -458,21 +493,23 @@ class GraphState(TypedDict):
     generation: str
     documents: List[Document]
     loop_step: int
+    scoped_source: NotRequired[Optional[str]]  # None = search all documents
 
 
 def retrieve(state):
-    print("---RETRIEVE---")
+    logger.debug("RETRIEVE")
     question = state["question"]
+    scoped_source = state.get("scoped_source")
 
     # Always fetch a fresh retriever instance to ensure it sees latest DB updates
-    retriever = get_retriever(k=4)
+    retriever = get_retriever(k=4, source_filter=scoped_source)
 
     documents = retriever.invoke(question)
     return {"documents": documents, "question": question}
 
 
 def grade_documents(state):
-    print("---CHECK DOCUMENT RELEVANCE (BATCHED)---")
+    logger.debug("CHECK DOCUMENT RELEVANCE (BATCHED)")
     question = state["question"]
     documents = state["documents"]
 
@@ -488,16 +525,16 @@ def grade_documents(state):
     filtered_docs = []
     for i, score in enumerate(scores):
         if score.binary_score == "yes":
-            print(f"   - Doc {i + 1}: RELEVANT")
+            logger.debug(f"Doc {i + 1}: RELEVANT")
             filtered_docs.append(documents[i])
         else:
-            print(f"   - Doc {i + 1}: NOT RELEVANT")
+            logger.debug(f"Doc {i + 1}: NOT RELEVANT")
 
     return {"documents": filtered_docs, "question": question}
 
 
 def generate_rag(state):
-    print("---GENERATE RAG---")
+    logger.debug("GENERATE RAG")
     question = state["question"]
     documents = state["documents"]
 
@@ -523,27 +560,23 @@ def generate_rag(state):
 
     full_context_string = "\n\n---\n\n".join(formatted_context_list)
 
-    print(f"   - Streaming response from {THINKING_OLLAMA_MODEL}...")
+    logger.debug(f"Streaming response from {THINKING_OLLAMA_MODEL}")
     generation = ""
 
-    # Stream the answer
     for chunk in rag_chain.stream({"context": full_context_string, "question": question}):
-        print(chunk, end="", flush=True)
         generation += chunk
-
-    print("\n")
 
     # Return generation AND pass the documents through
     return {"generation": generation, "documents": documents}
 
 
 def transform_query(state):
-    print("---TRANSFORM QUERY---")
+    logger.debug("TRANSFORM QUERY")
     question = state["question"]
     documents = state["documents"]
     loop_step = state.get("loop_step", 0)
     better_question = rewriter_chain.invoke({"question": question})
-    print(f"   - Rewritten: {better_question}")
+    logger.debug(f"Rewritten query: {better_question}")
     return {"documents": documents, "question": better_question, "loop_step": loop_step + 1}
 
 
@@ -579,17 +612,11 @@ workflow.add_edge("generate_rag", END)
 app = workflow.compile()
 
 
-# --- ENTRY POINT ---
+# --- ENTRY POINTS ---
 
-def query_documents(user_input: str, include_sources: bool = False):
-    """Execution wrapper returning Answer (and optional structured sources)."""
-    inputs = {"question": user_input, "loop_step": 0}
-
-    # Run the graph
+def _run_rag_graph(inputs: dict, include_sources: bool):
+    """Execute the compiled RAG graph and return a formatted answer."""
     config = {"recursion_limit": 25}
-    if GLOBAL_VECTORSTORE is None:
-        initialize_vectorstore()
-
     final_state = None
     generate_rag_state = None
 
@@ -600,7 +627,7 @@ def query_documents(user_input: str, include_sources: bool = False):
                 if key == "generate_rag":
                     generate_rag_state = value
     except Exception as e:
-        print(f"Query error: {e}")
+        logger.error(f"Graph execution error: {e}")
         return f"Error: {e}" if not include_sources else {"error": str(e)}
 
     result_state = generate_rag_state if generate_rag_state is not None else final_state
@@ -608,36 +635,55 @@ def query_documents(user_input: str, include_sources: bool = False):
         no_answer = "No answer generated."
         return no_answer if not include_sources else {"answer": no_answer, "citations": []}
 
-    # Extract final generation
     final_answer = result_state.get("generation", "No answer generated.")
     used_docs = result_state.get("documents", [])
 
-    # Format the sources list programmatically
     sources_data = []
     for doc in used_docs:
         meta = doc.metadata
-        filename = os.path.basename(meta.get("source", "Unknown"))
-
-        # logic to determine location
+        fname = os.path.basename(meta.get("source", "Unknown"))
         location = "N/A"
         if "page" in meta:
             location = f"Page {meta['page'] + 1}"
         elif "start_index" in meta:
             location = f"Start Char {meta['start_index']}"
-
         sources_data.append({
-            "file": filename,
+            "file": fname,
             "location": location,
-            "snippet": doc.page_content[:50] + "..."  # First 50 chars as preview
+            "snippet": doc.page_content[:50] + "...",
         })
 
-    # Return a dictionary containing both Answer and Structured Sources
     if include_sources:
-        return {
-            "answer": final_answer,
-            "citations": sources_data
-        }
+        return {"answer": final_answer, "citations": sources_data}
     return final_answer
+
+
+def query_documents(user_input: str, include_sources: bool = False):
+    """Search all indexed documents and return an answer."""
+    if GLOBAL_VECTORSTORE is None:
+        initialize_vectorstore()
+    return _run_rag_graph({"question": user_input, "loop_step": 0}, include_sources)
+
+
+def query_documents_scoped(user_input: str, filename: str, include_sources: bool = False):
+    """Search within a single named document and return an answer.
+
+    Args:
+        user_input: The user's question.
+        filename: The basename of the indexed file to restrict the search to.
+        include_sources: If True, return a dict with 'answer' and 'citations'.
+    """
+    if GLOBAL_VECTORSTORE is None:
+        initialize_vectorstore()
+
+    manifest = _load_index_manifest()
+    matching = [p for p in manifest if os.path.basename(p) == filename]
+    if not matching:
+        msg = f"No indexed document named '{filename}' found. Use `/status` to see available documents."
+        return {"answer": msg, "citations": []} if include_sources else msg
+
+    inputs = {"question": user_input, "loop_step": 0, "scoped_source": matching[0]}
+    return _run_rag_graph(inputs, include_sources)
 
 
 if __name__ == "__main__":

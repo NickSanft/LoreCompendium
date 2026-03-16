@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import urllib.request
 from enum import Enum
@@ -38,6 +39,15 @@ SUPPORTED_EXTENSIONS = ('.docx', '.pdf', '.xlsx', '.csv', '.txt', '.md')
 DOC_FOLDER = "./input"
 CHROMA_DB_PATH = "./chroma_store"
 CHROMA_COLLECTION_NAME = "word_docs_rag"
+
+
+def setup_logging(level: int = logging.INFO) -> None:
+    """Configure the root logger. Call once from the bot entry point."""
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
 
 
 def check_ollama_health() -> list[str]:
