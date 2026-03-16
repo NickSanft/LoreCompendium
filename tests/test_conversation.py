@@ -111,5 +111,68 @@ class TestAskStuff(unittest.TestCase):
         self.assertEqual(thread_id, "user123")
 
 
+class TestHistoryTrimming(unittest.TestCase):
+    def test_history_trimmed_to_max(self):
+        """conversation() should trim history to MAX_HISTORY_MESSAGES before passing to the agent."""
+        import conversation
+        from unittest.mock import MagicMock, patch
+
+        captured_inputs = {}
+
+        def fake_stream(inputs, config=None, stream_mode=None):
+            captured_inputs.update(inputs)
+            mock_msg = MagicMock()
+            mock_msg.content = "reply"
+            mock_msg.tool_calls = []
+            return iter([{"messages": [mock_msg]}])
+
+        # Build a state with more messages than the limit
+        over_limit = conversation.MAX_HISTORY_MESSAGES + 10
+        fake_messages = [MagicMock() for _ in range(over_limit)]
+        for m in fake_messages:
+            m.content = "msg"
+            m.tool_calls = []
+
+        state = {"messages": fake_messages}
+        config = {"metadata": {"user_id": "u1", "thread_id": "u1"}}
+
+        with patch.object(conversation.conversation_react_agent, "stream", side_effect=fake_stream):
+            conversation.conversation(state, config)
+
+        passed_messages = captured_inputs.get("messages", [])
+        # Subtract 1 for the system message prepended inside conversation()
+        history_passed = [m for m in passed_messages if not (isinstance(m, tuple) and m[0] == "system")]
+        self.assertLessEqual(len(history_passed), conversation.MAX_HISTORY_MESSAGES)
+
+    def test_short_history_not_trimmed(self):
+        """If history is under the limit, all messages should be passed through."""
+        import conversation
+        from unittest.mock import MagicMock, patch
+
+        captured_inputs = {}
+
+        def fake_stream(inputs, config=None, stream_mode=None):
+            captured_inputs.update(inputs)
+            mock_msg = MagicMock()
+            mock_msg.content = "reply"
+            mock_msg.tool_calls = []
+            return iter([{"messages": [mock_msg]}])
+
+        short_history = [MagicMock() for _ in range(5)]
+        for m in short_history:
+            m.content = "msg"
+            m.tool_calls = []
+
+        state = {"messages": short_history}
+        config = {"metadata": {"user_id": "u1", "thread_id": "u1"}}
+
+        with patch.object(conversation.conversation_react_agent, "stream", side_effect=fake_stream):
+            conversation.conversation(state, config)
+
+        passed_messages = captured_inputs.get("messages", [])
+        history_passed = [m for m in passed_messages if not (isinstance(m, tuple) and m[0] == "system")]
+        self.assertEqual(len(history_passed), 5)
+
+
 if __name__ == "__main__":
     unittest.main()
