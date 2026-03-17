@@ -356,3 +356,62 @@ select option { background: var(--surface-2); }
   display: flex;
   justify-content: flex-end;
 }
+
+/* ── Library / file table ───────────────────────────────────────────────────── */
+.file-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.file-table th {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.file-table td {
+  padding: 0.65rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.file-table tr:last-child td { border-bottom: none; }
+.file-table tr:hover td { background: var(--surface-2); }
+
+/* ── Upload area ────────────────────────────────────────────────────────────── */
+.upload-area {
+  border: 2px dashed var(--border);
+  background: var(--surface);
+  transition: border-color var(--transition), background var(--transition);
+  cursor: default;
+}
+
+.upload-area.drag-over {
+  border-color: var(--accent);
+  background: rgba(124, 106, 247, 0.07);
+}
+
+.upload-prompt {
+  text-align: center;
+  padding: 1.5rem 1rem;
+  cursor: pointer;
+  border-radius: var(--radius);
+  transition: background var(--transition);
+}
+
+.upload-prompt:hover { background: var(--surface-2); }
+
+code {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.1em 0.4em;
+  font-size: 0.88em;
+  font-family: "Consolas", "Fira Code", monospace;
+}
