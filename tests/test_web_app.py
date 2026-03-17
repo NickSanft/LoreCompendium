@@ -285,7 +285,7 @@ class TestVsearch(unittest.TestCase):
             with patch("web_app.similarity_search", return_value=[(doc, 0.9)]) as mock_ss:
                 self.client.post("/vsearch", data={"query": "q", "scope": "campaign.pdf", "k": 10, "min_score": 0.0})
         mock_ss.assert_called_once()
-        _, _, called_filter = mock_ss.call_args[0]
+        _, _, called_filter, *_ = mock_ss.call_args[0]
         self.assertEqual(called_filter, "/input/campaign.pdf")
 
     def test_result_count_shown(self):
@@ -539,6 +539,65 @@ class TestChunksData(unittest.TestCase):
              patch("web_app.similarity_search", return_value=[(doc, 0.72)]):
             r = self.client.get("/chunks/lore.txt/data?q=some")
         self.assertIn("72", r.text)
+
+
+# ---------------------------------------------------------------------------
+# Tag API
+# ---------------------------------------------------------------------------
+
+class TestTagAPI(unittest.TestCase):
+    def setUp(self):
+        self.client = _make_client()
+
+    def test_get_all_tags_returns_list(self):
+        manifest = {"/input/a.txt": {"tags": ["canon", "arc-1"]}, "/input/b.txt": {"tags": ["arc-1", "draft"]}}
+        with patch("web_app.get_indexed_files", return_value=manifest):
+            r = self.client.get("/library/tags")
+        self.assertEqual(r.status_code, 200)
+        tags = r.json()
+        self.assertIn("canon", tags)
+        self.assertIn("draft", tags)
+        self.assertEqual(tags, sorted(tags))
+
+    def test_get_all_tags_empty_manifest(self):
+        with patch("web_app.get_indexed_files", return_value={}):
+            r = self.client.get("/library/tags")
+        self.assertEqual(r.json(), [])
+
+    def test_set_tags_unknown_file_returns_404(self):
+        with patch("web_app.get_indexed_files", return_value={}):
+            r = self.client.put("/library/file/ghost.txt/tags", data={"tags": "canon"})
+        self.assertEqual(r.status_code, 404)
+
+    def test_set_tags_returns_pill_html(self):
+        manifest = {"/input/notes.txt": {}}
+        with patch("web_app.get_indexed_files", return_value=manifest), \
+             patch("web_app.set_tags") as mock_set:
+            r = self.client.put("/library/file/notes.txt/tags", data={"tags": "canon,arc-1"})
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("canon", r.text)
+        self.assertIn("arc-1", r.text)
+        mock_set.assert_called_once()
+
+    def test_set_tags_with_new_tag_appends(self):
+        manifest = {"/input/notes.txt": {}}
+        with patch("web_app.get_indexed_files", return_value=manifest), \
+             patch("web_app.set_tags") as mock_set:
+            r = self.client.put("/library/file/notes.txt/tags", data={"base": "canon", "new_tag": "arc-2"})
+        self.assertEqual(r.status_code, 200)
+        called_tags = mock_set.call_args[0][1]
+        self.assertIn("arc-2", called_tags)
+        self.assertIn("canon", called_tags)
+
+    def test_set_tags_deduplicates(self):
+        manifest = {"/input/a.txt": {}}
+        captured = {}
+        def fake_set(path, tags):
+            captured["tags"] = tags
+        with patch("web_app.get_indexed_files", return_value=manifest), \
+             patch("web_app.set_tags", side_effect=fake_set):
+            self.client.put("/library/file/a.txt/tags", data={"tags": "canon,canon,canon"})
+        self.assertEqual(captured["tags"].count("canon"), 1)
 
 
 if __name__ == "__main__":

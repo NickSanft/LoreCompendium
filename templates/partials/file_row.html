@@ -13,6 +13,27 @@
     {% endif %}
   </td>
   <td class="text-muted text-sm">{{ file.mtime | fmt_ts }}</td>
+  <td class="tag-cell-td">
+    {% if file.tags is defined %}
+    {% set safe_name = file.name | urlencode %}
+    {% set put_url = "/library/file/" ~ safe_name ~ "/tags" %}
+    <div class="tag-cell">
+      {% for tag in file.tags %}
+      {% set remaining = file.tags | reject("equalto", tag) | join(",") %}
+      <button class="tag-pill" type="button"
+              hx-put="{{ put_url }}"
+              hx-vals='{"tags": "{{ remaining }}"}'
+              hx-target="closest td"
+              hx-swap="innerHTML"
+              title="Remove tag">{{ tag }} ×</button>
+      {% endfor %}
+      <form hx-put="{{ put_url }}" hx-target="closest td" hx-swap="innerHTML" style="display:inline;">
+        <input type="hidden" name="base" value="{{ file.tags | join(',') }}">
+        <input class="tag-input" name="new_tag" placeholder="+ tag" style="width:70px;" autocomplete="off">
+      </form>
+    </div>
+    {% endif %}
+  </td>
   <td>
     <button class="btn btn-danger btn-sm"
             hx-delete="/library/file/{{ file.name | urlencode }}"

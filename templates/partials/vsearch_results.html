@@ -15,10 +15,11 @@
   <div class="result-header">
     <div>
       <span class="result-filename">{{ doc.metadata.get('source', 'Unknown') | basename }}</span>
-      {% if doc.metadata.get('page') != none %}
-        <span class="result-location">· Page {{ doc.metadata['page'] + 1 }}</span>
-      {% elif doc.metadata.get('start_index') != none %}
-        <span class="result-location">· Char {{ doc.metadata['start_index'] }}</span>
+      <span class="result-location">· {{ doc.metadata | format_location }}</span>
+      {% if doc.metadata.get('tags') %}
+        {% for tag in doc.metadata['tags'].split(',') %}
+          <span class="tag-pill tag-pill-sm">{{ tag }}</span>
+        {% endfor %}
       {% endif %}
     </div>
     <div class="result-score-wrap">

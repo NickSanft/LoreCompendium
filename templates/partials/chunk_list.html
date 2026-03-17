@@ -12,10 +12,11 @@
   <div class="result-header">
     <div>
       <span class="result-filename">#{{ idx }}</span>
-      {% if meta.get('page') is not none %}
-        <span class="result-location">· Page {{ meta['page'] + 1 }}</span>
-      {% elif meta.get('start_index') is not none %}
-        <span class="result-location">· Char {{ meta['start_index'] }}</span>
+      <span class="result-location">· {{ meta | format_location }}</span>
+      {% if meta.get('tags') %}
+        {% for tag in meta['tags'].split(',') %}
+          <span class="tag-pill tag-pill-sm">{{ tag }}</span>
+        {% endfor %}
       {% endif %}
     </div>
     {% if chunk.score is not none %}

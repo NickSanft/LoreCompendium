@@ -22,6 +22,9 @@ from document_engine import (
     get_chunks_for_file,
     get_duplicate_source,
     get_indexed_files,
+    get_tags,
+    set_tags,
+    _format_location,
     initialize_vectorstore,
     query_documents,
     query_documents_scoped,
@@ -54,6 +57,7 @@ def _fmt_ts(mtime) -> str:
 
 templates.env.filters["fmt_size"] = _fmt_size
 templates.env.filters["fmt_ts"] = _fmt_ts
+templates.env.filters["format_location"] = _format_location
 
 _MAX_QUERY_LENGTH = 500
 _STREAM_INTERVAL = 0.5   # seconds between intermediate SSE edits
@@ -122,6 +126,7 @@ async def library_page(request: Request):
             "size": sig.get("size", 0),
             "mtime": sig.get("mtime"),
             "chunks": chunk_counts.get(path, 0),
+            "tags": sig.get("tags", []),
         })
     return templates.TemplateResponse(
         request, "library.html",
@@ -175,6 +180,67 @@ async def library_reindex():
     if count == 0:
         return HTMLResponse('<span class="alert alert-info">No files found in input folder.</span>')
     return HTMLResponse(f'<span class="alert alert-success">Queued {count} file(s) for re-indexing.</span>')
+
+
+# ── Tag helpers ───────────────────────────────────────────────────────────────
+
+def _render_tag_pills(filename: str, tags: list[str]) -> str:
+    """Render tag pills + add-tag form as inline HTML."""
+    safe_name = html_mod.escape(filename)
+    put_url = f"/library/file/{safe_name}/tags"
+    pills = ""
+    for tag in tags:
+        remaining = html_mod.escape(",".join(t for t in tags if t != tag))
+        pills += (
+            f'<button class="tag-pill" type="button" '
+            f'hx-put="{put_url}" '
+            f'hx-vals=\'{{"tags":"{remaining}"}}\' '
+            f'hx-target="closest td" hx-swap="innerHTML">'
+            f'{html_mod.escape(tag)} ×</button>'
+        )
+    csv = html_mod.escape(",".join(tags))
+    add_form = (
+        f'<form hx-put="{put_url}" hx-target="closest td" hx-swap="innerHTML" '
+        f'style="display:inline;">'
+        f'<input type="hidden" name="base" value="{csv}">'
+        f'<input class="tag-input" name="new_tag" placeholder="+ tag" '
+        f'style="width:70px;" autocomplete="off">'
+        f'</form>'
+    )
+    return f'<div class="tag-cell">{pills}{add_form}</div>'
+
+
+# ── Tag API ───────────────────────────────────────────────────────────────────
+
+@app.get("/library/tags")
+async def library_all_tags():
+    """Return all unique tags across indexed files as a sorted JSON list."""
+    manifest = await asyncio.to_thread(get_indexed_files)
+    all_tags: set[str] = set()
+    for sig in manifest.values():
+        all_tags.update(sig.get("tags", []))
+    return sorted(all_tags)
+
+
+@app.put("/library/file/{name}/tags", response_class=HTMLResponse)
+async def library_set_tags(
+    name: str,
+    tags: str = Form(""),
+    new_tag: str = Form(""),
+    base: str = Form(""),
+):
+    full_path = await asyncio.to_thread(_resolve_scope, name)
+    if full_path is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    # Build final tag list from either `tags` (direct replace) or `base` + `new_tag`
+    if new_tag.strip():
+        base_tags = [t.strip().lower() for t in base.split(",") if t.strip()]
+        tag_list = base_tags + [new_tag.strip().lower()]
+    else:
+        tag_list = [t.strip().lower() for t in tags.split(",") if t.strip()]
+    tag_list = list(dict.fromkeys(tag_list))[:20]  # deduplicate, preserve order, cap
+    await asyncio.to_thread(set_tags, full_path, tag_list)
+    return HTMLResponse(_render_tag_pills(name, tag_list))
 
 
 @app.delete("/library/file/{name}", response_class=HTMLResponse)
@@ -257,22 +323,25 @@ async def search_files():
 async def search_start(
     query: str = Form(...),
     scope: str = Form(""),
+    tags: str = Form(""),
 ):
     err = _validate_query(query)
     if err:
         return HTMLResponse(f'<div class="alert alert-error">{html_mod.escape(err)}</div>', status_code=422)
 
+    tag_filter = tags.strip() or None
     job_id = str(uuid.uuid4())
     sq: queue.Queue = queue.Queue()
     loop = asyncio.get_running_loop()
 
+    import functools
     if scope:
         future = loop.run_in_executor(
-            None, query_documents_scoped, query, scope, False, sq
+            None, functools.partial(query_documents_scoped, query, scope, False, sq, tag_filter)
         )
     else:
         future = loop.run_in_executor(
-            None, query_documents, query, False, sq
+            None, functools.partial(query_documents, query, False, sq, tag_filter)
         )
 
     _jobs[job_id] = {"sq": sq, "future": future}
@@ -355,13 +424,15 @@ async def vsearch(
     scope: str = Form(""),
     k: int = Form(10),
     min_score: float = Form(0.3),
+    tags: str = Form(""),
 ):
     err = _validate_query(query)
     if err:
         return HTMLResponse(f'<div class="alert alert-error">{html_mod.escape(err)}</div>', status_code=422)
 
+    tag_filter = tags.strip() or None
     full_path = await asyncio.to_thread(_resolve_scope, scope)
-    hits = await asyncio.to_thread(similarity_search, query, k, full_path)
+    hits = await asyncio.to_thread(similarity_search, query, k, full_path, tag_filter)
 
     # Filter by minimum relevance score
     hits = [(doc, score) for doc, score in hits if score >= min_score]
