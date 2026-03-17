@@ -415,3 +415,71 @@ code {
   font-size: 0.88em;
   font-family: "Consolas", "Fira Code", monospace;
 }
+
+/* ── Tag pills ──────────────────────────────────────────────────────────────── */
+.tag-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  background: rgba(124, 106, 247, 0.15);
+  color: var(--accent);
+  border: 1px solid rgba(124, 106, 247, 0.35);
+  border-radius: 99px;
+  padding: 0.15rem 0.55rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--transition), border-color var(--transition);
+  white-space: nowrap;
+  margin-right: 0.2rem;
+  margin-bottom: 0.2rem;
+  font-family: inherit;
+}
+
+.tag-pill:hover {
+  background: rgba(248, 113, 113, 0.15);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.tag-pill-sm {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  cursor: default;
+}
+
+.tag-pill-sm:hover {
+  background: rgba(124, 106, 247, 0.15);
+  border-color: rgba(124, 106, 247, 0.35);
+  color: var(--accent);
+}
+
+.tag-cell {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.15rem;
+}
+
+.tag-input {
+  background: var(--surface-2);
+  border: 1px dashed var(--border);
+  border-radius: 99px;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  padding: 0.15rem 0.55rem;
+  outline: none;
+  transition: border-color var(--transition), color var(--transition);
+  font-family: inherit;
+  width: 70px;
+}
+
+.tag-input:focus {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.tag-cell-td {
+  min-width: 140px;
+  max-width: 260px;
+}
