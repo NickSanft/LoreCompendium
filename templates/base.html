@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{% block title %}Lore Compendium{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <!-- HTMX -->
+  <script src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js" defer></script>
+  <!-- HTMX SSE extension (used by the search page) -->
+  <script src="https://unpkg.com/htmx-ext-sse@2.2.2/sse.js" defer></script>
+  {% block head %}{% endblock %}
+</head>
+<body>
+
+<nav>
+  <div class="container nav-inner">
+    <a class="nav-brand" href="/">&#9776; Lore Compendium</a>
+    <ul class="nav-links">
+      <li><a href="/search" {% if active_page == 'search' %}class="active"{% endif %}>Search</a></li>
+      <li><a href="/library" {% if active_page == 'library' %}class="active"{% endif %}>Library</a></li>
+    </ul>
+  </div>
+</nav>
+
+<main>
+  <div class="container">
+    {% block content %}{% endblock %}
+  </div>
+</main>
+
+</body>
+</html>
