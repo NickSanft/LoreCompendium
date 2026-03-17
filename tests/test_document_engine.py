@@ -435,6 +435,34 @@ class TestStreamingQueue(unittest.TestCase):
         self.assertIn("world", items)
         self.assertIn(None, items)
 
+    def test_sources_footer_appended_to_queue(self):
+        """A formatted Sources block should be queued after LLM chunks and before None."""
+        import document_engine
+        import queue as q_module
+        from langchain_core.documents import Document
+
+        sq = q_module.Queue()
+        doc = Document(page_content="text", metadata={"source": "/input/lore.pdf", "page": 2})
+        state = {"question": "q", "documents": [doc], "stream_queue": sq}
+
+        mock_chain = MagicMock()
+        mock_chain.stream.return_value = iter(["Answer"])
+        with patch.object(document_engine, "rag_chain", mock_chain):
+            document_engine.generate_rag(state)
+
+        items = []
+        while not sq.empty():
+            items.append(sq.get_nowait())
+
+        # Sentinel must be last
+        self.assertIsNone(items[-1])
+        # Footer must be the item before the sentinel
+        footer = items[-2]
+        self.assertIn("Sources:", footer)
+        self.assertIn("[1]", footer)
+        self.assertIn("lore.pdf", footer)
+        self.assertIn("Page 3", footer)  # page 2 (0-indexed) → "Page 3"
+
     def test_stream_queue_none_does_not_break_query(self):
         """Passing no stream_queue should still return a normal answer string."""
         import document_engine
@@ -649,7 +677,7 @@ class TestRetrieveUsesK4(unittest.TestCase):
         import document_engine
         captured = {}
 
-        def fake_get_retriever(k=4, source_filter=None):
+        def fake_get_retriever(k=4, source_filter=None, tag_filter=None):
             captured["k"] = k
             mock_retriever = MagicMock()
             mock_retriever.invoke.return_value = []
@@ -712,6 +740,201 @@ class TestShutdown(unittest.TestCase):
                 document_engine.INGESTION_QUEUE.get_nowait()
             except Exception:
                 pass
+
+
+# ---------------------------------------------------------------------------
+# Tags — manifest helpers
+# ---------------------------------------------------------------------------
+
+class TestGetSetTags(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        import document_engine
+        self._orig = document_engine.INDEXED_FILES_PATH
+        document_engine.INDEXED_FILES_PATH = os.path.join(self.tmp, "indexed_files.txt")
+
+    def tearDown(self):
+        import document_engine
+        document_engine.INDEXED_FILES_PATH = self._orig
+
+    def _write_manifest(self, data):
+        import document_engine
+        with open(document_engine.INDEXED_FILES_PATH, "w") as f:
+            import json
+            json.dump(data, f)
+
+    def test_get_tags_returns_empty_for_missing_file(self):
+        from document_engine import get_tags
+        self.assertEqual(get_tags("/input/missing.txt"), [])
+
+    def test_get_tags_returns_stored_tags(self):
+        self._write_manifest({"/input/a.txt": {"mtime": 1.0, "size": 10, "hash": "x", "tags": ["canon", "arc-1"]}})
+        from document_engine import get_tags
+        self.assertEqual(get_tags("/input/a.txt"), ["canon", "arc-1"])
+
+    def test_set_tags_updates_manifest(self):
+        self._write_manifest({"/input/a.txt": {"mtime": 1.0, "size": 10, "hash": "x", "tags": []}})
+        import document_engine
+        with patch.object(document_engine.INGESTION_QUEUE, "put"):
+            document_engine.set_tags("/input/a.txt", ["new-tag"])
+        self.assertEqual(document_engine.get_tags("/input/a.txt"), ["new-tag"])
+
+    def test_set_tags_normalises_case(self):
+        self._write_manifest({"/input/a.txt": {"mtime": 1.0, "size": 10, "hash": "x"}})
+        import document_engine
+        with patch.object(document_engine.INGESTION_QUEUE, "put"):
+            document_engine.set_tags("/input/a.txt", ["Canon", "  ARC-1 "])
+        self.assertEqual(document_engine.get_tags("/input/a.txt"), ["canon", "arc-1"])
+
+    def test_set_tags_caps_at_20(self):
+        self._write_manifest({"/input/a.txt": {"mtime": 1.0, "size": 10, "hash": "x"}})
+        import document_engine
+        with patch.object(document_engine.INGESTION_QUEUE, "put"):
+            document_engine.set_tags("/input/a.txt", [f"tag{i}" for i in range(30)])
+        self.assertLessEqual(len(document_engine.get_tags("/input/a.txt")), 20)
+
+    def test_set_tags_does_nothing_for_unknown_file(self):
+        self._write_manifest({})
+        import document_engine
+        with patch.object(document_engine.INGESTION_QUEUE, "put") as mock_put:
+            document_engine.set_tags("/input/ghost.txt", ["tag"])
+        mock_put.assert_not_called()
+
+    def test_update_manifest_preserves_existing_tags(self):
+        import document_engine
+        # Write a manifest entry with existing tags
+        data = {"/input/a.txt": {"mtime": 1.0, "size": 10, "hash": "x", "tags": ["keep-me"]}}
+        self._write_manifest(data)
+        # Create a real temp file so _get_file_signature works
+        import tempfile as tf
+        path = os.path.join(self.tmp, "a.txt")
+        with open(path, "w") as f:
+            f.write("hello")
+        document_engine.INDEXED_FILES_PATH = os.path.join(self.tmp, "indexed_files.txt")
+        data = {path: {"mtime": 1.0, "size": 5, "hash": "x", "tags": ["keep-me"]}}
+        self._write_manifest(data)
+        document_engine._update_manifest("add", path)
+        result = document_engine._load_index_manifest()
+        self.assertEqual(result[path].get("tags"), ["keep-me"])
+
+
+# ---------------------------------------------------------------------------
+# _format_location
+# ---------------------------------------------------------------------------
+
+class TestFormatLocation(unittest.TestCase):
+    def test_line_range(self):
+        from document_engine import _format_location
+        self.assertEqual(_format_location({"line_start": 5, "line_end": 8}), "Lines 5–8")
+
+    def test_single_line(self):
+        from document_engine import _format_location
+        self.assertEqual(_format_location({"line_start": 3, "line_end": 3}), "Line 3")
+
+    def test_sheet_and_row(self):
+        from document_engine import _format_location
+        self.assertEqual(_format_location({"sheet": "Sheet1", "row": 7}), "Sheet 'Sheet1' · Row 7")
+
+    def test_row_only(self):
+        from document_engine import _format_location
+        self.assertEqual(_format_location({"row": 4}), "Row 4")
+
+    def test_paragraph_index(self):
+        from document_engine import _format_location
+        self.assertEqual(_format_location({"paragraph_index": 2}), "Paragraph 2")
+
+    def test_page(self):
+        from document_engine import _format_location
+        self.assertEqual(_format_location({"page": 0}), "Page 1")
+
+    def test_start_index_fallback(self):
+        from document_engine import _format_location
+        self.assertEqual(_format_location({"start_index": 450}), "Char 450")
+
+    def test_unknown_fallback(self):
+        from document_engine import _format_location
+        self.assertEqual(_format_location({}), "Unknown")
+
+
+# ---------------------------------------------------------------------------
+# _citation_location
+# ---------------------------------------------------------------------------
+
+class TestCitationLocation(unittest.TestCase):
+    def test_prefers_page_over_line(self):
+        from document_engine import _citation_location
+        # Both page and line present — page wins
+        self.assertEqual(_citation_location({"page": 2, "line_start": 10}), "Page 3")
+
+    def test_page_zero_indexed(self):
+        from document_engine import _citation_location
+        self.assertEqual(_citation_location({"page": 0}), "Page 1")
+
+    def test_line_range_when_no_page(self):
+        from document_engine import _citation_location
+        self.assertEqual(_citation_location({"line_start": 5, "line_end": 8}), "Lines 5–8")
+
+    def test_single_line_when_no_page(self):
+        from document_engine import _citation_location
+        self.assertEqual(_citation_location({"line_start": 3, "line_end": 3}), "Line 3")
+
+    def test_sheet_and_row(self):
+        from document_engine import _citation_location
+        self.assertEqual(_citation_location({"sheet": "Sheet1", "row": 7}), "Sheet 'Sheet1' · Row 7")
+
+    def test_row_only(self):
+        from document_engine import _citation_location
+        self.assertEqual(_citation_location({"row": 4}), "Row 4")
+
+    def test_paragraph_index(self):
+        from document_engine import _citation_location
+        self.assertEqual(_citation_location({"paragraph_index": 2}), "Paragraph 2")
+
+    def test_start_index_fallback(self):
+        from document_engine import _citation_location
+        self.assertEqual(_citation_location({"start_index": 450}), "Char 450")
+
+    def test_empty_returns_empty_string(self):
+        from document_engine import _citation_location
+        self.assertEqual(_citation_location({}), "")
+
+
+# ---------------------------------------------------------------------------
+# _enrich_line_numbers
+# ---------------------------------------------------------------------------
+
+class TestEnrichLineNumbers(unittest.TestCase):
+    def _make_doc(self, content, start_index, offsets):
+        from langchain_core.documents import Document
+        import json
+        return Document(
+            page_content=content,
+            metadata={"start_index": start_index, "_line_offsets_json": json.dumps(offsets)},
+        )
+
+    def test_adds_line_start_and_end(self):
+        from document_engine import _enrich_line_numbers
+        # 3-line file: "line1\nline2\nline3"
+        # offsets (char starts of each line, 0-indexed internally, 1-based output):
+        # line 1 starts at 0, line 2 at 6, line 3 at 12
+        offsets = [0, 6, 12, 17]
+        doc = self._make_doc("line1\n", 0, offsets)
+        result = _enrich_line_numbers([doc])
+        self.assertEqual(result[0].metadata["line_start"], 1)
+
+    def test_removes_temp_key(self):
+        from document_engine import _enrich_line_numbers
+        offsets = [0, 6, 12]
+        doc = self._make_doc("abc", 0, offsets)
+        result = _enrich_line_numbers([doc])
+        self.assertNotIn("_line_offsets_json", result[0].metadata)
+
+    def test_no_offsets_key_leaves_doc_unchanged(self):
+        from langchain_core.documents import Document
+        from document_engine import _enrich_line_numbers
+        doc = Document(page_content="hello", metadata={"start_index": 0})
+        result = _enrich_line_numbers([doc])
+        self.assertNotIn("line_start", result[0].metadata)
 
 
 if __name__ == "__main__":

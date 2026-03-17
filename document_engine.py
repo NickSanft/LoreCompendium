@@ -42,6 +42,66 @@ from lore_utils import CHROMA_COLLECTION_NAME, CHROMA_DB_PATH, THINKING_OLLAMA_M
 logger = logging.getLogger(__name__)
 
 GLOBAL_VECTORSTORE: Optional[Chroma] = None
+
+
+def _format_location(meta: dict) -> str:
+    """Convert chunk metadata into a human-readable location string."""
+    if "line_start" in meta:
+        ls, le = meta["line_start"], meta.get("line_end", meta["line_start"])
+        return f"Line {ls}" if ls == le else f"Lines {ls}–{le}"
+    if meta.get("sheet") and "row" in meta:
+        return f"Sheet '{meta['sheet']}' · Row {meta['row']}"
+    if "row" in meta:
+        return f"Row {meta['row']}"
+    if "paragraph_index" in meta:
+        return f"Paragraph {meta['paragraph_index']}"
+    if "page" in meta:
+        return f"Page {meta['page'] + 1}"
+    if "start_index" in meta:
+        return f"Char {meta['start_index']}"
+    return "Unknown"
+
+
+def _citation_location(meta: dict) -> str:
+    """Location string for citations: prefer page number, then line, then other."""
+    if "page" in meta:
+        return f"Page {meta['page'] + 1}"
+    if "line_start" in meta:
+        ls, le = meta["line_start"], meta.get("line_end", meta["line_start"])
+        return f"Line {ls}" if ls == le else f"Lines {ls}–{le}"
+    if meta.get("sheet") and "row" in meta:
+        return f"Sheet '{meta['sheet']}' · Row {meta['row']}"
+    if "row" in meta:
+        return f"Row {meta['row']}"
+    if "paragraph_index" in meta:
+        return f"Paragraph {meta['paragraph_index']}"
+    if "start_index" in meta:
+        return f"Char {meta['start_index']}"
+    return ""
+
+
+def _enrich_line_numbers(splits: list) -> list:
+    """Add line_start and line_end to splits from .txt/.md files.
+
+    The loader stores a JSON-encoded newline-offset list in
+    ``_line_offsets_json`` metadata. This function reads it, computes line
+    numbers via bisect, writes line_start / line_end, then removes the
+    temporary key so it is not stored in ChromaDB.
+    """
+    import bisect
+    for doc in splits:
+        raw = doc.metadata.pop("_line_offsets_json", None)
+        if raw is None:
+            continue
+        try:
+            offsets = json.loads(raw)
+        except Exception:
+            continue
+        start = doc.metadata.get("start_index", 0)
+        end = start + len(doc.page_content)
+        doc.metadata["line_start"] = bisect.bisect_right(offsets, start)
+        doc.metadata["line_end"]   = bisect.bisect_right(offsets, max(end - 1, start))
+    return splits
 INGESTION_QUEUE = queue.Queue()
 MANIFEST_LOCK = threading.Lock()
 INDEXED_FILES_PATH = os.path.join(CHROMA_DB_PATH, "indexed_files.txt")
@@ -64,6 +124,30 @@ def load_pdf(file_path: str) -> List[Document]:
     return docs
 
 
+def _load_xlsx(file_path: str) -> List[Document]:
+    """Load an Excel workbook row-by-row using openpyxl, preserving sheet/row metadata."""
+    import openpyxl
+    docs = []
+    try:
+        wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            for row in ws.iter_rows():
+                row_num = row[0].row
+                text = "\t".join(
+                    str(cell.value) for cell in row if cell.value is not None
+                ).strip()
+                if text:
+                    docs.append(Document(
+                        page_content=text,
+                        metadata={"source": file_path, "sheet": sheet_name, "row": row_num},
+                    ))
+        wb.close()
+    except Exception as e:
+        logger.error(f"Error loading xlsx {file_path}: {e}")
+    return docs
+
+
 def load_document_by_extension(file_path: str) -> List[Document]:
     """
     Selects the appropriate loader based on file extension.
@@ -78,17 +162,35 @@ def load_document_by_extension(file_path: str) -> List[Document]:
         if ext == '.pdf':
             return load_pdf(file_path)
         elif ext == '.docx':
-            loader = UnstructuredWordDocumentLoader(file_path)
-            return loader.load()
+            loader = UnstructuredWordDocumentLoader(file_path, mode="elements")
+            docs = loader.load()
+            for i, doc in enumerate(docs):
+                # unstructured stores page numbers as 'page_number' (1-indexed);
+                # remap to 'page' (0-indexed) so _citation_location picks it up
+                if "page_number" in doc.metadata and "page" not in doc.metadata:
+                    pn = doc.metadata.pop("page_number")
+                    if pn is not None:
+                        doc.metadata["page"] = int(pn) - 1
+                doc.metadata["paragraph_index"] = i + 1
+            return docs
         elif ext == '.xlsx':
-            loader = UnstructuredExcelLoader(file_path, mode="elements")
-            return loader.load()
+            return _load_xlsx(file_path)
         elif ext == '.csv':
             loader = CSVLoader(file_path)
             return loader.load()
         elif ext in ['.txt', '.md']:
             loader = TextLoader(file_path, encoding='utf-8', autodetect_encoding=True)
-            return loader.load()
+            docs = loader.load()
+            # Pre-compute newline offsets for post-split line number enrichment
+            if docs:
+                raw_text = docs[0].page_content
+                offsets = [0]
+                for line in raw_text.splitlines(keepends=True):
+                    offsets.append(offsets[-1] + len(line))
+                offsets_json = json.dumps(offsets)
+                for doc in docs:
+                    doc.metadata["_line_offsets_json"] = offsets_json
+            return docs
         return []
     except Exception as e:
         logger.error(f"Error loading {file_path}: {e}")
@@ -181,7 +283,7 @@ def _write_index_manifest(manifest: dict) -> None:
         logger.error(f"Error writing index manifest: {e}")
 
 
-def _update_manifest(action: str, file_path: str) -> None:
+def _update_manifest(action: str, file_path: str, tags: Optional[list] = None) -> None:
     with MANIFEST_LOCK:
         manifest = _load_index_manifest()
         if action == "delete":
@@ -189,8 +291,29 @@ def _update_manifest(action: str, file_path: str) -> None:
             _write_index_manifest(manifest)
             return
         if os.path.exists(file_path):
-            manifest[file_path] = _get_file_signature(file_path)
+            existing_tags = manifest.get(file_path, {}).get("tags", [])
+            sig = _get_file_signature(file_path)
+            sig["tags"] = tags if tags is not None else existing_tags
+            manifest[file_path] = sig
             _write_index_manifest(manifest)
+
+
+def get_tags(file_path: str) -> list[str]:
+    """Return the tag list for a file from the manifest, or [] if not found."""
+    return _load_index_manifest().get(file_path, {}).get("tags", [])
+
+
+def set_tags(file_path: str, tags: list[str]) -> None:
+    """Replace the tag list for a file and re-queue it for ingestion so
+    ChromaDB chunk metadata is refreshed with the new tags."""
+    cleaned = [t.lower().strip()[:50] for t in tags if t.strip()][:20]
+    with MANIFEST_LOCK:
+        manifest = _load_index_manifest()
+        if file_path not in manifest:
+            return
+        manifest[file_path]["tags"] = cleaned
+        _write_index_manifest(manifest)
+    INGESTION_QUEUE.put(("update", file_path))
 
 
 def ingestion_worker():
@@ -247,6 +370,14 @@ def ingestion_worker():
                     docs = load_document_by_extension(file_path)
                     if docs:
                         splits = text_splitter.split_documents(docs)
+                        splits = _enrich_line_numbers(splits)
+                        # Read current tags from manifest and stamp onto each split
+                        manifest_snap = _load_index_manifest()
+                        for split in splits:
+                            src = split.metadata.get("source", "")
+                            t = manifest_snap.get(src, {}).get("tags", [])
+                            if t:
+                                split.metadata["tags"] = ",".join(t)
                         splits = filter_complex_metadata(splits)
                         if splits:
                             GLOBAL_VECTORSTORE.add_documents(splits)
@@ -358,6 +489,13 @@ def initialize_vectorstore():
                 add_start_index=True
             )
             splits = text_splitter.split_documents(docs)
+            splits = _enrich_line_numbers(splits)
+            # Stamp tags from manifest onto each split
+            for split in splits:
+                src = split.metadata.get("source", "")
+                t = manifest.get(src, {}).get("tags", [])
+                if t:
+                    split.metadata["tags"] = ",".join(t)
             splits = filter_complex_metadata(splits)
 
             vectorstore.add_documents(splits)
@@ -432,13 +570,15 @@ def trigger_reindex() -> int:
     return count
 
 
-def get_retriever(k=4, source_filter: Optional[str] = None):
+def get_retriever(k=4, source_filter: Optional[str] = None, tag_filter: Optional[str] = None):
     """Returns a retriever interface from the current global vectorstore.
 
     Args:
         k: Number of documents to retrieve.
         source_filter: If provided, restricts results to documents whose
             ``source`` metadata field matches this full file path.
+        tag_filter: If provided, restricts results to documents whose
+            ``tags`` metadata field contains this tag string.
     """
     global GLOBAL_VECTORSTORE
     if GLOBAL_VECTORSTORE is None:
@@ -447,6 +587,12 @@ def get_retriever(k=4, source_filter: Optional[str] = None):
     search_kwargs: dict = {"k": k, "fetch_k": 20, "lambda_mult": 0.5}
     if source_filter:
         search_kwargs["filter"] = {"source": source_filter}
+    if tag_filter:
+        tag_f = {"tags": {"$contains": tag_filter}}
+        if "filter" in search_kwargs:
+            search_kwargs["filter"] = {"$and": [search_kwargs["filter"], tag_f]}
+        else:
+            search_kwargs["filter"] = tag_f
 
     return GLOBAL_VECTORSTORE.as_retriever(
         search_type="mmr",
@@ -468,22 +614,24 @@ class GradeDocuments(BaseModel):
 
 
 structured_llm_grader = fast_llm.with_structured_output(GradeDocuments)
-grader_system = """You are a grader assessing relevance of a retrieved document to a user question. 
-If the document contains keyword(s) or semantic meaning related to the user question, grade it as relevant. 
-Give a binary score 'yes' or 'no' score to indicate whether the document is relevant to the question."""
+grader_system = """You are a grader assessing whether a retrieved document contains information needed to answer a user question.
+Grade as 'yes' ONLY if the document directly contains information that addresses the specific question — not merely shares the same general topic or setting.
+Grade as 'no' if the document's content is tangential or does not actually help answer the question.
+Give a binary score 'yes' or 'no'."""
 grader_prompt = ChatPromptTemplate.from_messages(
     [("system", grader_system), ("human", "Retrieved document: \n\n {document} \n\n User question: {question}")]
 )
 grader_chain = grader_prompt | structured_llm_grader
 
 rag_system_prompt = """You are a helpful assistant. Answer the user's question based ONLY on the context provided below.
-The context is formatted as: 
-[Source: filename | Location: page or line number]
-Content...
+Each context chunk is labelled with a reference number: [1], [2], etc.
 
-When answering:
-1. Cite your sources in the text using the format [Source Name, Page/Line].
-2. If the context does not contain the answer, say "I don't know."
+Rules:
+1. Base your answer SOLELY on what is explicitly written in the provided chunks.
+2. Cite a chunk [N] inline ONLY if the specific fact you are stating appears literally in that chunk's text.
+3. Do NOT attribute information to a source if that information does not appear in that source's text.
+4. If the context does not contain the answer, say "I don't know."
+5. Do NOT add a Sources list at the end — one will be appended automatically.
 """
 
 # RAG Generator
@@ -512,15 +660,17 @@ class GraphState(TypedDict):
     loop_step: int
     scoped_source: NotRequired[Optional[str]]         # None = search all documents
     stream_queue: NotRequired[Optional[queue.Queue]]  # queue for live token streaming
+    tag_filter: NotRequired[Optional[str]]            # optional tag to restrict retrieval
 
 
 def retrieve(state):
     question = state["question"]
     scoped_source = state.get("scoped_source")
+    tag_filter = state.get("tag_filter")
     logger.debug(f"[RETRIEVE] question: {question!r}" +
                  (f" | scoped to: {os.path.basename(scoped_source)}" if scoped_source else ""))
 
-    retriever = get_retriever(k=4, source_filter=scoped_source)
+    retriever = get_retriever(k=4, source_filter=scoped_source, tag_filter=tag_filter)
     documents = retriever.invoke(question)
 
     sources = [os.path.basename(d.metadata.get("source", "?")) for d in documents]
@@ -557,19 +707,11 @@ def generate_rag(state):
     documents = state["documents"]
 
     formatted_context_list = []
-
-    for doc in documents:
+    for i, doc in enumerate(documents):
         source_name = os.path.basename(doc.metadata.get("source", "Unknown"))
-
-        if "page" in doc.metadata:
-            location = f"Page {doc.metadata['page'] + 1}"
-        elif "start_index" in doc.metadata:
-            location = f"Char Index {doc.metadata['start_index']}"
-        else:
-            location = "Unknown Location"
-
-        formatted_entry = f"[Source: {source_name} | Location: {location}]\n{doc.page_content}"
-        formatted_context_list.append(formatted_entry)
+        location = _citation_location(doc.metadata)
+        loc_str = f" ({location})" if location else ""
+        formatted_context_list.append(f"[{i + 1}] {source_name}{loc_str}\n{doc.page_content}")
 
     full_context_string = "\n\n---\n\n".join(formatted_context_list)
 
@@ -587,6 +729,20 @@ def generate_rag(state):
         generation += chunk
         if sq is not None:
             sq.put(chunk)
+
+    # Append a Sources section using page → line priority
+    if documents:
+        source_lines = []
+        for i, doc in enumerate(documents):
+            meta = doc.metadata
+            fname = os.path.basename(meta.get("source", "Unknown"))
+            loc = _citation_location(meta)
+            source_lines.append(f"[{i + 1}] {fname}" + (f" — {loc}" if loc else ""))
+        footer = "\n\n---\n**Sources:**\n" + "\n".join(source_lines)
+        generation += footer
+        if sq is not None:
+            sq.put(footer)
+
     if sq is not None:
         sq.put(None)  # sentinel — signals streaming is complete
 
@@ -666,11 +822,7 @@ def _run_rag_graph(inputs: dict, include_sources: bool):
     for doc in used_docs:
         meta = doc.metadata
         fname = os.path.basename(meta.get("source", "Unknown"))
-        location = "N/A"
-        if "page" in meta:
-            location = f"Page {meta['page'] + 1}"
-        elif "start_index" in meta:
-            location = f"Start Char {meta['start_index']}"
+        location = _format_location(meta)
         sources_data.append({
             "file": fname,
             "location": location,
@@ -683,18 +835,22 @@ def _run_rag_graph(inputs: dict, include_sources: bool):
 
 
 def query_documents(user_input: str, include_sources: bool = False,
-                    stream_queue: Optional[queue.Queue] = None):
+                    stream_queue: Optional[queue.Queue] = None,
+                    tag_filter: Optional[str] = None):
     """Search all indexed documents and return an answer."""
     if GLOBAL_VECTORSTORE is None:
         initialize_vectorstore()
     inputs: dict = {"question": user_input, "loop_step": 0}
     if stream_queue is not None:
         inputs["stream_queue"] = stream_queue
+    if tag_filter:
+        inputs["tag_filter"] = tag_filter
     return _run_rag_graph(inputs, include_sources)
 
 
 def query_documents_scoped(user_input: str, filename: str, include_sources: bool = False,
-                           stream_queue: Optional[queue.Queue] = None):
+                           stream_queue: Optional[queue.Queue] = None,
+                           tag_filter: Optional[str] = None):
     """Search within a single named document and return an answer.
 
     Args:
@@ -702,6 +858,7 @@ def query_documents_scoped(user_input: str, filename: str, include_sources: bool
         filename: The basename of the indexed file to restrict the search to.
         include_sources: If True, return a dict with 'answer' and 'citations'.
         stream_queue: Optional queue that receives token chunks as they are generated.
+        tag_filter: Optional tag string to further restrict the search.
     """
     if GLOBAL_VECTORSTORE is None:
         initialize_vectorstore()
@@ -715,6 +872,8 @@ def query_documents_scoped(user_input: str, filename: str, include_sources: bool
     inputs: dict = {"question": user_input, "loop_step": 0, "scoped_source": matching[0]}
     if stream_queue is not None:
         inputs["stream_queue"] = stream_queue
+    if tag_filter:
+        inputs["tag_filter"] = tag_filter
     return _run_rag_graph(inputs, include_sources)
 
 
@@ -722,6 +881,7 @@ def similarity_search(
     query: str,
     k: int = 10,
     source_filter: Optional[str] = None,
+    tag_filter: Optional[str] = None,
 ) -> list[tuple]:
     """Return top-k (Document, relevance_score) pairs without LLM generation.
 
@@ -732,6 +892,12 @@ def similarity_search(
     if GLOBAL_VECTORSTORE is None:
         return []
     filter_dict = {"source": source_filter} if source_filter else None
+    if tag_filter:
+        tag_f = {"tags": {"$contains": tag_filter}}
+        if filter_dict is not None:
+            filter_dict = {"$and": [filter_dict, tag_f]}
+        else:
+            filter_dict = tag_f
     try:
         return GLOBAL_VECTORSTORE.similarity_search_with_relevance_scores(
             query, k=k, filter=filter_dict
