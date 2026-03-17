@@ -718,5 +718,28 @@ def query_documents_scoped(user_input: str, filename: str, include_sources: bool
     return _run_rag_graph(inputs, include_sources)
 
 
+def similarity_search(
+    query: str,
+    k: int = 10,
+    source_filter: Optional[str] = None,
+) -> list[tuple]:
+    """Return top-k (Document, relevance_score) pairs without LLM generation.
+
+    relevance_score is in [0, 1] — higher means more similar.
+    source_filter, if given, must be the full file path stored in the manifest.
+    Returns an empty list if the vectorstore is not ready or an error occurs.
+    """
+    if GLOBAL_VECTORSTORE is None:
+        return []
+    filter_dict = {"source": source_filter} if source_filter else None
+    try:
+        return GLOBAL_VECTORSTORE.similarity_search_with_relevance_scores(
+            query, k=k, filter=filter_dict
+        )
+    except Exception as e:
+        logger.error(f"Similarity search error: {e}")
+        return []
+
+
 if __name__ == "__main__":
     query_documents("Who is best friends with Dagbert?", True)
