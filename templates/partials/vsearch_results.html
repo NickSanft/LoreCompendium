@@ -1,0 +1,41 @@
+{% if total == 0 %}
+<div class="empty-state">
+  <p>No results found for <strong>{{ query }}</strong>.</p>
+  <p class="text-sm mt-1">Try a different query or lower the minimum relevance threshold.</p>
+</div>
+{% else %}
+<p class="text-muted text-sm" style="margin-bottom:1rem;">
+  Showing {{ total }} result{{ 's' if total != 1 else '' }} for <strong>{{ query }}</strong>
+</p>
+
+{% for doc, score in hits %}
+{% set pct = (score * 100) | round(0) | int %}
+{% set bar_color = "var(--success)" if score >= 0.7 else ("var(--warning)" if score >= 0.4 else "var(--danger)") %}
+<div class="result-card">
+  <div class="result-header">
+    <div>
+      <span class="result-filename">{{ doc.metadata.get('source', 'Unknown') | basename }}</span>
+      {% if doc.metadata.get('page') != none %}
+        <span class="result-location">· Page {{ doc.metadata['page'] + 1 }}</span>
+      {% elif doc.metadata.get('start_index') != none %}
+        <span class="result-location">· Char {{ doc.metadata['start_index'] }}</span>
+      {% endif %}
+    </div>
+    <div class="result-score-wrap">
+      <span class="result-score-label">{{ "%.0f"|format(score * 100) }}%</span>
+      <div class="score-bar-bg">
+        <div class="score-bar-fill" style="width:{{ pct }}%; background:{{ bar_color }};"></div>
+      </div>
+    </div>
+  </div>
+  <pre class="result-text">{{ doc.page_content }}</pre>
+  <div class="result-footer">
+    <button class="btn btn-secondary btn-sm copy-btn"
+            onclick="navigator.clipboard.writeText(this.dataset.text)"
+            data-text="{{ doc.page_content | e }}">
+      Copy
+    </button>
+  </div>
+</div>
+{% endfor %}
+{% endif %}

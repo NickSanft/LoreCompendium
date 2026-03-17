@@ -6,6 +6,89 @@
 <p class="page-subtitle">Ask a question across your indexed documents.</p>
 
 <div class="card">
-  <p class="empty-state text-muted">Coming in Phase 2.</p>
+  <form id="search-form"
+        hx-post="/search/start"
+        hx-target="#results"
+        hx-swap="innerHTML"
+        hx-indicator="#search-spinner">
+
+    <div class="form-group">
+      <label for="query">Query</label>
+      <input type="text" id="query" name="query" placeholder="What happened at the Battle of Helm's Deep?" autocomplete="off" required />
+    </div>
+
+    <div class="flex gap-2" style="flex-wrap: wrap;">
+      <div class="form-group" style="flex: 1; min-width: 200px;">
+        <label for="scope">Scope</label>
+        <select id="scope" name="scope"
+                hx-get="/search/files"
+                hx-trigger="load"
+                hx-swap="innerHTML"
+                hx-target="this">
+          <option value="">Loading files…</option>
+        </select>
+      </div>
+
+      <div class="form-group" style="flex: 1; min-width: 220px;">
+        <label>Mode</label>
+        <div class="mode-toggle">
+          <label class="mode-option">
+            <input type="radio" name="mode" value="ai" checked />
+            <span>AI Answer</span>
+          </label>
+          <label class="mode-option">
+            <input type="radio" name="mode" value="vector" />
+            <span>Similarity Search</span>
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <!-- Advanced options for vector search -->
+    <details id="advanced-opts" style="display:none; margin-bottom: 1rem;">
+      <summary class="text-muted text-sm" style="cursor:pointer; margin-bottom:.5rem;">Advanced options</summary>
+      <div class="flex gap-2 items-center" style="flex-wrap:wrap;">
+        <div class="form-group" style="flex:1; min-width:120px;">
+          <label for="k">Max results</label>
+          <select id="k" name="k">
+            <option value="5">5</option>
+            <option value="10" selected>10</option>
+            <option value="20">20</option>
+            <option value="50">50</option>
+          </select>
+        </div>
+        <div class="form-group" style="flex:2; min-width:200px;">
+          <label for="min_score">Min relevance: <span id="score-label">0.30</span></label>
+          <input type="range" id="min_score" name="min_score"
+                 min="0" max="1" step="0.05" value="0.3"
+                 oninput="document.getElementById('score-label').textContent = parseFloat(this.value).toFixed(2)"
+                 style="width:100%; accent-color: var(--accent);" />
+        </div>
+      </div>
+    </details>
+
+    <div class="flex gap-2 items-center">
+      <button type="submit" class="btn btn-primary" id="search-btn">Search</button>
+      <span id="search-spinner" class="htmx-indicator flex items-center gap-1">
+        <span class="spinner"></span>
+        <span class="text-muted text-sm">Searching…</span>
+      </span>
+    </div>
+  </form>
 </div>
+
+<div id="results" class="mt-3"></div>
+
+<script>
+  // Switch hx-post target and show/hide advanced options based on mode
+  document.querySelectorAll('[name="mode"]').forEach(function(radio) {
+    radio.addEventListener('change', function() {
+      var form = document.getElementById('search-form');
+      var isVector = this.value === 'vector';
+      form.setAttribute('hx-post', isVector ? '/vsearch' : '/search/start');
+      document.getElementById('advanced-opts').style.display = isVector ? 'block' : 'none';
+      htmx.process(form);
+    });
+  });
+</script>
 {% endblock %}
