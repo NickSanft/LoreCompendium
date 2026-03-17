@@ -741,5 +741,35 @@ def similarity_search(
         return []
 
 
+def get_chunks_for_file(file_path: str) -> list[dict]:
+    """Return all stored chunks for a file as a list of {content, metadata} dicts.
+
+    Results are sorted by start_index when available, otherwise by page.
+    Returns an empty list if the vectorstore is not ready or an error occurs.
+    """
+    if GLOBAL_VECTORSTORE is None:
+        return []
+    try:
+        results = GLOBAL_VECTORSTORE.get(
+            where={"source": file_path},
+            include=["metadatas", "documents"],
+        )
+        chunks = [
+            {"content": doc, "metadata": meta}
+            for doc, meta in zip(
+                results.get("documents", []),
+                results.get("metadatas", []),
+            )
+        ]
+        chunks.sort(key=lambda c: (
+            c["metadata"].get("page", 0),
+            c["metadata"].get("start_index", 0),
+        ))
+        return chunks
+    except Exception as e:
+        logger.error(f"Error fetching chunks for {file_path}: {e}")
+        return []
+
+
 if __name__ == "__main__":
     query_documents("Who is best friends with Dagbert?", True)
