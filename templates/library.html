@@ -2,10 +2,107 @@
 {% block title %}Library — Lore Compendium{% endblock %}
 
 {% block content %}
-<h1 class="page-title">Library</h1>
-<p class="page-subtitle">Manage your indexed documents.</p>
-
-<div class="card">
-  <p class="empty-state text-muted">Coming in Phase 4.</p>
+<div class="flex justify-between items-center" style="margin-bottom:1.25rem; flex-wrap:wrap; gap:.75rem;">
+  <div>
+    <h1 class="page-title" style="margin-bottom:.2rem;">Library</h1>
+    <p class="page-subtitle" style="margin-bottom:0;">{{ files|length }} document{{ 's' if files|length != 1 else '' }} indexed</p>
+  </div>
+  <div class="flex gap-1 items-center" style="flex-wrap:wrap;">
+    <span id="reindex-status"></span>
+    <button class="btn btn-secondary"
+            hx-post="/library/reindex"
+            hx-target="#reindex-status"
+            hx-swap="innerHTML">
+      ↺ Reindex All
+    </button>
+  </div>
 </div>
+
+<!-- Upload area -->
+<div class="card upload-area" id="upload-area" style="margin-bottom:1.5rem;">
+  <form id="upload-form"
+        hx-post="/library/upload"
+        hx-target="#upload-notice"
+        hx-swap="innerHTML"
+        hx-encoding="multipart/form-data"
+        hx-indicator="#upload-spinner">
+    <input type="file" id="file-input" name="file" accept="{{ supported }}" style="display:none"
+           onchange="this.form.requestSubmit()" />
+    <div class="upload-prompt" onclick="document.getElementById('file-input').click()">
+      <span style="font-size:1.8rem;">📄</span>
+      <p style="margin:.4rem 0 .2rem; font-weight:600;">Drop a file here or click to upload</p>
+      <p class="text-muted text-sm">Supported: {{ supported }}</p>
+    </div>
+    <span id="upload-spinner" class="htmx-indicator flex items-center gap-1 mt-1" style="justify-content:center;">
+      <span class="spinner"></span>
+      <span class="text-muted text-sm">Uploading…</span>
+    </span>
+  </form>
+  <div id="upload-notice" style="margin-top:.5rem;"></div>
+</div>
+
+<!-- File table -->
+{% if files %}
+<div style="overflow-x:auto;">
+  <table class="file-table">
+    <thead>
+      <tr>
+        <th>File</th>
+        <th>Size</th>
+        <th>Chunks</th>
+        <th>Indexed</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody id="file-tbody">
+      {% for file in files %}
+        {% include "partials/file_row.html" %}
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="empty-state">
+  <p>No documents indexed yet.</p>
+  <p class="text-sm mt-1">Upload a file above or add files to the <code>input/</code> folder and click Reindex All.</p>
+</div>
+{% endif %}
+
+<script>
+  // Drag-and-drop support
+  var area = document.getElementById('upload-area');
+  area.addEventListener('dragover', function(e) {
+    e.preventDefault();
+    area.classList.add('drag-over');
+  });
+  area.addEventListener('dragleave', function() {
+    area.classList.remove('drag-over');
+  });
+  area.addEventListener('drop', function(e) {
+    e.preventDefault();
+    area.classList.remove('drag-over');
+    var files = e.dataTransfer.files;
+    if (files.length > 0) {
+      var input = document.getElementById('file-input');
+      input.files = files;
+      input.dispatchEvent(new Event('change'));
+    }
+  });
+
+  // Prepend new file rows to tbody
+  document.body.addEventListener('htmx:afterSwap', function(e) {
+    if (e.detail.target && e.detail.target.id === 'upload-notice') {
+      var row = e.detail.xhr.responseText.match(/<tr[\s\S]*?<\/tr>/);
+      if (row) {
+        var tbody = document.getElementById('file-tbody');
+        if (tbody) {
+          var tmp = document.createElement('tbody');
+          tmp.innerHTML = row[0];
+          tbody.prepend(tmp.firstChild);
+          htmx.process(tbody);
+        }
+      }
+    }
+  });
+</script>
 {% endblock %}

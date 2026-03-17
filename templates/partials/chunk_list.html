@@ -1,0 +1,42 @@
+{% if not chunks %}
+<div class="empty-state">No chunks found for this file.</div>
+{% else %}
+<p class="text-muted text-sm" style="margin-bottom:1rem;">
+  {{ chunks|length }} chunk{{ 's' if chunks|length != 1 else '' }}
+  {% if query %} — scored for <strong>{{ query }}</strong>{% endif %}
+</p>
+{% for chunk in chunks %}
+{% set idx = loop.index %}
+{% set meta = chunk.metadata %}
+<div class="result-card">
+  <div class="result-header">
+    <div>
+      <span class="result-filename">#{{ idx }}</span>
+      {% if meta.get('page') is not none %}
+        <span class="result-location">· Page {{ meta['page'] + 1 }}</span>
+      {% elif meta.get('start_index') is not none %}
+        <span class="result-location">· Char {{ meta['start_index'] }}</span>
+      {% endif %}
+    </div>
+    {% if chunk.score is not none %}
+    {% set pct = (chunk.score * 100) | round(0) | int %}
+    {% set bar_color = "var(--success)" if chunk.score >= 0.7 else ("var(--warning)" if chunk.score >= 0.4 else "var(--danger)") %}
+    <div class="result-score-wrap">
+      <span class="result-score-label">{{ "%.0f"|format(chunk.score * 100) }}%</span>
+      <div class="score-bar-bg">
+        <div class="score-bar-fill" style="width:{{ pct }}%; background:{{ bar_color }};"></div>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+  <pre class="result-text">{{ chunk.content }}</pre>
+  <div class="result-footer">
+    <button class="btn btn-secondary btn-sm"
+            onclick="navigator.clipboard.writeText(this.dataset.text)"
+            data-text="{{ chunk.content | e }}">
+      Copy
+    </button>
+  </div>
+</div>
+{% endfor %}
+{% endif %}

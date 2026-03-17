@@ -42,7 +42,9 @@ class TestPageRoutes(unittest.TestCase):
         self.assertIn("Search", r.text)
 
     def test_library_page_returns_200(self):
-        r = self.client.get("/library")
+        with patch("web_app.get_indexed_files", return_value={}), \
+             patch("web_app.get_chunk_counts", return_value={}):
+            r = self.client.get("/library")
         self.assertEqual(r.status_code, 200)
 
     def test_health_returns_ok(self):
@@ -340,6 +342,203 @@ class TestResolveScope(unittest.TestCase):
         with patch("web_app.get_indexed_files", return_value={}):
             result = web_app._resolve_scope("missing.txt")
         self.assertIsNone(result)
+
+
+# ---------------------------------------------------------------------------
+# GET /library
+# ---------------------------------------------------------------------------
+
+class TestLibraryPage(unittest.TestCase):
+    def setUp(self):
+        self.client = _make_client()
+
+    def test_library_page_returns_200(self):
+        with patch("web_app.get_indexed_files", return_value={}), \
+             patch("web_app.get_chunk_counts", return_value={}):
+            r = self.client.get("/library")
+        self.assertEqual(r.status_code, 200)
+
+    def test_library_shows_files(self):
+        manifest = {"/input/lore.pdf": {"size": 1024, "mtime": 1742000000.0}}
+        with patch("web_app.get_indexed_files", return_value=manifest), \
+             patch("web_app.get_chunk_counts", return_value={"/input/lore.pdf": 5}):
+            r = self.client.get("/library")
+        self.assertIn("lore.pdf", r.text)
+
+    def test_library_empty_state_when_no_files(self):
+        with patch("web_app.get_indexed_files", return_value={}), \
+             patch("web_app.get_chunk_counts", return_value={}):
+            r = self.client.get("/library")
+        self.assertIn("No documents", r.text)
+
+    def test_library_shows_upload_area(self):
+        with patch("web_app.get_indexed_files", return_value={}), \
+             patch("web_app.get_chunk_counts", return_value={}):
+            r = self.client.get("/library")
+        self.assertIn("upload", r.text.lower())
+
+
+# ---------------------------------------------------------------------------
+# POST /library/upload
+# ---------------------------------------------------------------------------
+
+class TestLibraryUpload(unittest.TestCase):
+    def setUp(self):
+        self.client = _make_client()
+
+    def test_unsupported_extension_returns_error(self):
+        r = self.client.post(
+            "/library/upload",
+            files={"file": ("malware.exe", b"data", "application/octet-stream")},
+        )
+        self.assertEqual(r.status_code, 422)
+        self.assertIn("Unsupported", r.text)
+
+    def test_valid_txt_file_saves_and_returns_row(self):
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("web_app.DOC_FOLDER", tmp), \
+                 patch("web_app.get_duplicate_source", return_value=None), \
+                 patch("web_app.INGESTION_QUEUE") as mock_q:
+                r = self.client.post(
+                    "/library/upload",
+                    files={"file": ("notes.txt", b"hello world", "text/plain")},
+                )
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("notes.txt", r.text)
+
+    def test_duplicate_detection_shows_warning(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("web_app.DOC_FOLDER", tmp), \
+                 patch("web_app.get_duplicate_source", return_value="original.txt"), \
+                 patch("web_app.INGESTION_QUEUE"):
+                r = self.client.post(
+                    "/library/upload",
+                    files={"file": ("copy.txt", b"hello world", "text/plain")},
+                )
+        self.assertIn("Duplicate", r.text)
+
+
+# ---------------------------------------------------------------------------
+# POST /library/reindex
+# ---------------------------------------------------------------------------
+
+class TestLibraryReindex(unittest.TestCase):
+    def setUp(self):
+        self.client = _make_client()
+
+    def test_reindex_returns_count(self):
+        with patch("web_app.trigger_reindex", return_value=3):
+            r = self.client.post("/library/reindex")
+        self.assertIn("3", r.text)
+
+    def test_reindex_no_files_shows_message(self):
+        with patch("web_app.trigger_reindex", return_value=0):
+            r = self.client.post("/library/reindex")
+        self.assertIn("No files", r.text)
+
+
+# ---------------------------------------------------------------------------
+# DELETE /library/file/{name}
+# ---------------------------------------------------------------------------
+
+class TestLibraryDelete(unittest.TestCase):
+    def setUp(self):
+        self.client = _make_client()
+
+    def test_delete_nonexistent_returns_404(self):
+        r = self.client.delete("/library/file/does_not_exist.txt")
+        self.assertEqual(r.status_code, 404)
+
+    def test_delete_existing_file_returns_200(self):
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "to_delete.txt")
+            with open(target, "w") as f:
+                f.write("content")
+            with patch("web_app.DOC_FOLDER", tmp), \
+                 patch("web_app.INGESTION_QUEUE"):
+                r = self.client.delete("/library/file/to_delete.txt")
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(os.path.exists(target))
+
+    def test_delete_prevents_path_traversal(self):
+        # ../etc/passwd should be sanitised to passwd, which won't exist
+        r = self.client.delete("/library/file/..%2Fetc%2Fpasswd")
+        self.assertEqual(r.status_code, 404)
+
+
+# ---------------------------------------------------------------------------
+# GET /chunks/{filename}
+# ---------------------------------------------------------------------------
+
+class TestChunksPage(unittest.TestCase):
+    def setUp(self):
+        self.client = _make_client()
+
+    def test_unknown_file_returns_404(self):
+        with patch("web_app.get_indexed_files", return_value={}):
+            r = self.client.get("/chunks/missing.txt")
+        self.assertEqual(r.status_code, 404)
+
+    def test_known_file_returns_200(self):
+        manifest = {"/input/lore.txt": {"size": 500, "mtime": 1742000000.0}}
+        with patch("web_app.get_indexed_files", return_value=manifest), \
+             patch("web_app.get_chunk_counts", return_value={"/input/lore.txt": 3}):
+            r = self.client.get("/chunks/lore.txt")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("lore.txt", r.text)
+
+    def test_chunk_page_has_back_link(self):
+        manifest = {"/input/notes.txt": {"size": 100, "mtime": 1742000000.0}}
+        with patch("web_app.get_indexed_files", return_value=manifest), \
+             patch("web_app.get_chunk_counts", return_value={}):
+            r = self.client.get("/chunks/notes.txt")
+        self.assertIn("/library", r.text)
+
+
+# ---------------------------------------------------------------------------
+# GET /chunks/{filename}/data
+# ---------------------------------------------------------------------------
+
+class TestChunksData(unittest.TestCase):
+    def setUp(self):
+        self.client = _make_client()
+
+    def _make_doc(self, text, source="/input/lore.txt", start_index=0):
+        from langchain_core.documents import Document
+        return Document(page_content=text, metadata={"source": source, "start_index": start_index})
+
+    def test_unknown_file_returns_empty_state(self):
+        with patch("web_app.get_indexed_files", return_value={}):
+            r = self.client.get("/chunks/missing.txt/data")
+        self.assertIn("not found", r.text.lower())
+
+    def test_returns_chunks_html(self):
+        manifest = {"/input/lore.txt": {}}
+        chunks = [{"content": "First passage.", "metadata": {"source": "/input/lore.txt", "start_index": 0}}]
+        with patch("web_app.get_indexed_files", return_value=manifest), \
+             patch("web_app.get_chunks_for_file", return_value=chunks):
+            r = self.client.get("/chunks/lore.txt/data")
+        self.assertIn("First passage", r.text)
+
+    def test_scored_query_uses_similarity_search(self):
+        manifest = {"/input/lore.txt": {}}
+        doc = self._make_doc("Relevant text.")
+        with patch("web_app.get_indexed_files", return_value=manifest), \
+             patch("web_app.similarity_search", return_value=[(doc, 0.88)]) as mock_ss:
+            r = self.client.get("/chunks/lore.txt/data?q=relevant")
+        mock_ss.assert_called_once()
+        self.assertIn("Relevant text", r.text)
+
+    def test_scored_chunks_show_percentage(self):
+        manifest = {"/input/lore.txt": {}}
+        doc = self._make_doc("Some text.")
+        with patch("web_app.get_indexed_files", return_value=manifest), \
+             patch("web_app.similarity_search", return_value=[(doc, 0.72)]):
+            r = self.client.get("/chunks/lore.txt/data?q=some")
+        self.assertIn("72", r.text)
 
 
 if __name__ == "__main__":

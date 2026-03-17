@@ -1,0 +1,25 @@
+<tr id="row-{{ file.name | replace('.', '-') | replace(' ', '-') }}">
+  <td>
+    <a href="/chunks/{{ file.name | urlencode }}" class="text-accent" style="text-decoration:none; font-weight:600;">
+      {{ file.name }}
+    </a>
+  </td>
+  <td class="text-muted text-sm">{{ file.size | fmt_size }}</td>
+  <td class="text-muted text-sm">
+    {% if indexing is defined and indexing %}
+      <span style="color:var(--warning);">indexing…</span>
+    {% else %}
+      {{ file.chunks }} chunk{{ 's' if file.chunks != 1 else '' }}
+    {% endif %}
+  </td>
+  <td class="text-muted text-sm">{{ file.mtime | fmt_ts }}</td>
+  <td>
+    <button class="btn btn-danger btn-sm"
+            hx-delete="/library/file/{{ file.name | urlencode }}"
+            hx-target="closest tr"
+            hx-swap="delete"
+            hx-confirm="Delete {{ file.name }}? This cannot be undone.">
+      ✕
+    </button>
+  </td>
+</tr>

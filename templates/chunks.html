@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}{{ filename }} — Chunks — Lore Compendium{% endblock %}
+
+{% block content %}
+<div style="margin-bottom:1.5rem;">
+  <a href="/library" class="text-muted text-sm" style="text-decoration:none;">← Back to Library</a>
+  <h1 class="page-title" style="margin-top:.5rem; margin-bottom:.2rem;">{{ filename }}</h1>
+  <p class="page-subtitle" style="margin-bottom:0;">
+    {{ size | fmt_size }} · {{ chunk_count }} chunk{{ 's' if chunk_count != 1 else '' }}
+  </p>
+</div>
+
+<div class="card" style="margin-bottom:1.5rem;">
+  <form hx-get="/chunks/{{ filename | urlencode }}/data"
+        hx-target="#chunk-list"
+        hx-swap="innerHTML"
+        hx-indicator="#chunk-spinner"
+        hx-trigger="submit, load">
+    <div class="flex gap-2 items-center" style="flex-wrap:wrap;">
+      <div class="form-group" style="flex:1; min-width:260px; margin-bottom:0;">
+        <label for="chunk-q">Filter query <span class="text-muted">(optional — scores and sorts by relevance)</span></label>
+        <input type="text" id="chunk-q" name="q" placeholder="Leave blank to see all chunks in order" autocomplete="off" />
+      </div>
+      <div style="padding-top:1.4rem;">
+        <button type="submit" class="btn btn-primary">Score chunks</button>
+        <button type="button" class="btn btn-secondary" onclick="document.getElementById('chunk-q').value=''; htmx.trigger(this.closest('form'), 'submit')">
+          Reset
+        </button>
+        <span id="chunk-spinner" class="htmx-indicator" style="margin-left:.5rem;">
+          <span class="spinner"></span>
+        </span>
+      </div>
+    </div>
+  </form>
+</div>
+
+<div id="chunk-list">
+  <div class="empty-state"><span class="spinner"></span></div>
+</div>
+{% endblock %}
