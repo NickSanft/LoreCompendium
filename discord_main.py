@@ -389,8 +389,35 @@ async def chunk_and_send(ctx, original_message, original_response, interaction: 
             await original_message.edit(content=original_response)
 
 
-def split_into_chunks(s, chunk_size=2000):
-    return [s[i:i + chunk_size] for i in range(0, len(s), chunk_size)]
+def split_into_chunks(s: str, chunk_size: int = 1990) -> list[str]:
+    """Split s into chunks of at most chunk_size characters.
+
+    Prefers to break at paragraph boundaries (double newline), then single
+    newlines, then sentence-ending punctuation, before falling back to a hard
+    character cut. This prevents words and sentences being split mid-flow.
+    """
+    if not s:
+        return []
+    if len(s) <= chunk_size:
+        return [s]
+    chunks: list[str] = []
+    while s:
+        if len(s) <= chunk_size:
+            chunks.append(s)
+            break
+        window = s[:chunk_size]
+        pos = -1
+        for sep in ("\n\n", "\n", ". ", "! ", "? "):
+            idx = window.rfind(sep)
+            # Accept a break at or past the halfway mark
+            if idx >= chunk_size // 2:
+                pos = idx + len(sep)
+                break
+        if pos <= 0:
+            pos = chunk_size
+        chunks.append(s[:pos].rstrip())
+        s = s[pos:].lstrip("\n")
+    return [c for c in chunks if c]
 
 
 if __name__ == '__main__':
