@@ -59,6 +59,43 @@ class TestSplitIntoChunks(unittest.TestCase):
         self.assertEqual(result[0], "aaa")
         self.assertEqual(result[-1], "a")
 
+    # --- Boundary-aware behaviour ---
+
+    def test_prefers_newline_boundary_over_hard_cut(self):
+        # Newline is at or past the halfway mark — should split there
+        text = "hello\nworld and more text here"
+        result = self._split(text, size=10)
+        # No chunk may exceed the size limit
+        self.assertFalse(any(len(c) > 10 for c in result))
+        # The word "hello" must not be split across chunks
+        joined = " ".join(result)
+        self.assertIn("hello", joined)
+
+    def test_prefers_double_newline_over_single(self):
+        # Double newline past the halfway mark should be chosen over single newline
+        text = "paragraph one\n\nparagraph two extra words here"
+        result = self._split(text, size=20)
+        self.assertFalse(any(len(c) > 20 for c in result))
+        # "paragraph one" should be intact in some chunk
+        self.assertTrue(any("paragraph one" in c for c in result))
+
+    def test_falls_back_to_sentence_boundary(self):
+        # No newlines, but a sentence end past the halfway mark of the window
+        text = "First sentence. " + "x" * 20
+        result = self._split(text, size=25)
+        self.assertFalse(any(len(c) > 25 for c in result))
+        # "First sentence" should be intact in the first chunk
+        self.assertTrue(any("First sentence" in c for c in result))
+
+    def test_content_preserved_with_boundary_splitting(self):
+        text = "Line one.\nLine two.\nLine three.\nLine four.\nLine five."
+        result = self._split(text, size=30)
+        # All chunks within limit
+        self.assertFalse(any(len(c) > 30 for c in result))
+        # Every line's content should appear in some chunk
+        for line in ["Line one", "Line two", "Line three", "Line four", "Line five"]:
+            self.assertTrue(any(line in c for c in result), f"'{line}' missing from chunks")
+
 
 class TestValidateQuery(unittest.TestCase):
     def test_valid_query_returns_none(self):

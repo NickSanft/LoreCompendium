@@ -857,10 +857,102 @@ class TestRetrieveUsesK4(unittest.TestCase):
             mock_retriever.invoke.return_value = []
             return mock_retriever
 
-        with patch.object(document_engine, "get_retriever", side_effect=fake_get_retriever):
+        mock_chain = MagicMock()
+        mock_chain.invoke.return_value = ""
+        with patch.object(document_engine, "get_retriever", side_effect=fake_get_retriever), \
+             patch.object(document_engine, "multi_query_chain", mock_chain):
             document_engine.retrieve({"question": "test", "documents": [], "loop_step": 0})
 
         self.assertEqual(captured.get("k"), 4)
+
+
+# ---------------------------------------------------------------------------
+# Multi-query retrieval
+# ---------------------------------------------------------------------------
+
+class TestMultiQueryRetrieve(unittest.TestCase):
+    def _make_retriever(self, docs):
+        m = MagicMock()
+        m.invoke.return_value = docs
+        return m
+
+    def test_falls_back_gracefully_when_llm_errors(self):
+        """If multi_query_chain raises, retrieve still returns results for the original query."""
+        import document_engine
+        from langchain_core.documents import Document
+
+        doc = Document(page_content="result", metadata={"source": "/f.txt"})
+        retriever = self._make_retriever([doc])
+
+        mock_chain = MagicMock()
+        mock_chain.invoke.side_effect = RuntimeError("ollama down")
+
+        with patch.object(document_engine, "get_retriever", return_value=retriever), \
+             patch.object(document_engine, "multi_query_chain", mock_chain):
+            state = document_engine.retrieve({"question": "test query", "documents": [], "loop_step": 0})
+
+        self.assertEqual(len(state["documents"]), 1)
+
+    def test_deduplicates_identical_docs_across_variants(self):
+        """The same document returned by multiple variant queries is included only once."""
+        import document_engine
+        from langchain_core.documents import Document
+
+        shared_doc = Document(page_content="shared content", metadata={"source": "/f.txt"})
+        retriever = self._make_retriever([shared_doc])
+
+        mock_chain = MagicMock()
+        mock_chain.invoke.return_value = "1. Alternative phrasing"
+
+        with patch.object(document_engine, "get_retriever", return_value=retriever), \
+             patch.object(document_engine, "multi_query_chain", mock_chain):
+            state = document_engine.retrieve({"question": "original", "documents": [], "loop_step": 0})
+
+        self.assertEqual(len(state["documents"]), 1)
+
+    def test_merges_unique_docs_from_variants(self):
+        """Documents unique to each variant query are all included in the merged result."""
+        import document_engine
+        from langchain_core.documents import Document
+
+        doc_original = Document(page_content="original result", metadata={"source": "/f.txt"})
+        doc_variant  = Document(page_content="variant result",  metadata={"source": "/f.txt"})
+
+        call_count = {"n": 0}
+        def side_effect_invoke(q):
+            call_count["n"] += 1
+            return [doc_original] if call_count["n"] == 1 else [doc_variant]
+
+        retriever = MagicMock()
+        retriever.invoke.side_effect = side_effect_invoke
+
+        mock_chain = MagicMock()
+        mock_chain.invoke.return_value = "1. A different phrasing"
+
+        with patch.object(document_engine, "get_retriever", return_value=retriever), \
+             patch.object(document_engine, "multi_query_chain", mock_chain):
+            state = document_engine.retrieve({"question": "original", "documents": [], "loop_step": 0})
+
+        contents = {d.page_content for d in state["documents"]}
+        self.assertIn("original result", contents)
+        self.assertIn("variant result", contents)
+
+    def test_caps_at_three_queries(self):
+        """At most 3 queries (original + 2 variants) are sent to the retriever."""
+        import document_engine
+
+        mock_chain = MagicMock()
+        # Return 5 numbered lines — should be capped at 2 variants
+        mock_chain.invoke.return_value = "\n".join(f"{i}. variant {i}" for i in range(1, 6))
+
+        retriever = MagicMock()
+        retriever.invoke.return_value = []
+
+        with patch.object(document_engine, "get_retriever", return_value=retriever), \
+             patch.object(document_engine, "multi_query_chain", mock_chain):
+            document_engine.retrieve({"question": "q", "documents": [], "loop_step": 0})
+
+        self.assertLessEqual(retriever.invoke.call_count, 3)
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import os
+import re
 import time
 import queue
 import threading
@@ -753,6 +754,17 @@ rewrite_prompt = ChatPromptTemplate.from_messages(
 )
 rewriter_chain = rewrite_prompt | fast_llm | StrOutputParser()
 
+# Multi-query — generate alternative phrasings to improve retrieval recall
+multi_query_system = (
+    "You are an AI assistant. Generate {n} alternative phrasings of the following question "
+    "to improve document retrieval. Each phrasing should approach the topic differently. "
+    "Output only the rephrased questions, one per line, numbered."
+)
+multi_query_prompt = ChatPromptTemplate.from_messages(
+    [("system", multi_query_system), ("human", "{question}")]
+)
+multi_query_chain = multi_query_prompt | fast_llm | StrOutputParser()
+
 
 # --- PART 3: GRAPH NODES (OPTIMIZED) ---
 
@@ -773,11 +785,31 @@ def retrieve(state):
     logger.debug(f"[RETRIEVE] question: {question!r}" +
                  (f" | scoped to: {os.path.basename(scoped_source)}" if scoped_source else ""))
 
+    # Generate alternative phrasings to improve recall; fall back gracefully
+    queries = [question]
+    try:
+        variants_text = multi_query_chain.invoke({"question": question, "n": 2})
+        for line in variants_text.splitlines():
+            variant = re.sub(r"^\d+[\.\)\-]\s*", "", line.strip())
+            if variant and variant not in queries:
+                queries.append(variant)
+    except Exception:
+        pass  # use original query only if LLM call fails
+    queries = queries[:3]
+    logger.debug(f"[RETRIEVE] {len(queries)} query variant(s): {queries}")
+
     retriever = get_retriever(k=4, source_filter=scoped_source, tag_filter=tag_filter)
-    documents = retriever.invoke(question)
+    seen: set[int] = set()
+    documents: List[Document] = []
+    for q in queries:
+        for doc in retriever.invoke(q):
+            key = hash(doc.page_content)
+            if key not in seen:
+                seen.add(key)
+                documents.append(doc)
 
     sources = [os.path.basename(d.metadata.get("source", "?")) for d in documents]
-    logger.debug(f"[RETRIEVE] got {len(documents)} doc(s): {sources}")
+    logger.debug(f"[RETRIEVE] {len(documents)} unique doc(s) across {len(queries)} query/queries: {sources}")
     return {"documents": documents, "question": question}
 
 
