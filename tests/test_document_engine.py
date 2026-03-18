@@ -219,15 +219,15 @@ class TestLoadDocumentByExtension(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    def test_docx_dispatches_to_word_loader(self):
+    def test_docx_dispatches_to_load_docx(self):
         path = self._make_temp(".docx")
         try:
-            mock_doc = MagicMock()
-            with patch("document_engine.UnstructuredWordDocumentLoader") as MockLoader:
-                MockLoader.return_value.load.return_value = [mock_doc]
-                import document_engine
+            import document_engine
+            mock_docs = [MagicMock()]
+            with patch.object(document_engine, "_load_docx", return_value=mock_docs) as mock_fn:
                 result = document_engine.load_document_by_extension(path)
-            self.assertEqual(result, [mock_doc])
+            mock_fn.assert_called_once_with(path)
+            self.assertEqual(result, mock_docs)
         finally:
             os.unlink(path)
 
@@ -264,6 +264,180 @@ class TestLoadDocumentByExtension(unittest.TestCase):
             self.assertEqual(result, [])
         finally:
             os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# _load_docx — page-break tracking
+# ---------------------------------------------------------------------------
+
+class TestLoadDocx(unittest.TestCase):
+    """Tests for _load_docx — returns a single Document with _page_offsets_json."""
+
+    def _write_docx(self, items) -> str:
+        """Write a .docx to a temp file.
+
+        items is a list of:
+          str                       → normal paragraph
+          'page_break'              → run-level page break (empty paragraph)
+          'page_break_before:text'  → paragraph with pageBreakBefore property
+        """
+        import docx as _docx
+        from docx.oxml.ns import qn
+        from docx.oxml import OxmlElement
+
+        doc = _docx.Document()
+        for p in doc.paragraphs:
+            p._element.getparent().remove(p._element)
+
+        for item in items:
+            if item == 'page_break':
+                p = doc.add_paragraph()
+                run = p.add_run()
+                br = OxmlElement('w:br')
+                br.set(qn('w:type'), 'page')
+                run._r.append(br)
+            elif isinstance(item, str) and item.startswith('page_break_before:'):
+                text = item[len('page_break_before:'):]
+                p = doc.add_paragraph(text)
+                pPr = p._p.get_or_add_pPr()
+                pbBefore = OxmlElement('w:pageBreakBefore')
+                pPr.append(pbBefore)
+            else:
+                doc.add_paragraph(item)
+
+        f = tempfile.NamedTemporaryFile(suffix='.docx', delete=False)
+        doc.save(f.name)
+        f.close()
+        return f.name
+
+    def test_returns_single_document(self):
+        path = self._write_docx(['Hello world', 'Second paragraph'])
+        try:
+            from document_engine import _load_docx
+            docs = _load_docx(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(len(docs), 1)
+
+    def test_paragraphs_joined_in_content(self):
+        path = self._write_docx(['Hello world', 'Second paragraph'])
+        try:
+            from document_engine import _load_docx
+            docs = _load_docx(path)
+        finally:
+            os.unlink(path)
+        self.assertIn('Hello world', docs[0].page_content)
+        self.assertIn('Second paragraph', docs[0].page_content)
+
+    def test_page_offsets_json_present(self):
+        path = self._write_docx(['Page one', 'page_break', 'Page two'])
+        try:
+            from document_engine import _load_docx
+            docs = _load_docx(path)
+        finally:
+            os.unlink(path)
+        self.assertIn('_page_offsets_json', docs[0].metadata)
+
+    def test_run_level_break_recorded_in_offsets(self):
+        path = self._write_docx(['Page one', 'page_break', 'Page two'])
+        try:
+            from document_engine import _load_docx
+            docs = _load_docx(path)
+        finally:
+            os.unlink(path)
+        import json
+        offsets = json.loads(docs[0].metadata['_page_offsets_json'])
+        pages = [op[1] for op in offsets]
+        self.assertIn(1, pages)  # page 1 (0-indexed) must be recorded
+
+    def test_page_break_before_recorded_in_offsets(self):
+        path = self._write_docx(['First', 'page_break_before:Second'])
+        try:
+            from document_engine import _load_docx
+            docs = _load_docx(path)
+        finally:
+            os.unlink(path)
+        import json
+        offsets = json.loads(docs[0].metadata['_page_offsets_json'])
+        pages = [op[1] for op in offsets]
+        self.assertIn(1, pages)
+
+    def test_empty_paragraphs_excluded_from_content(self):
+        path = self._write_docx(['Real content', ''])
+        try:
+            from document_engine import _load_docx
+            docs = _load_docx(path)
+        finally:
+            os.unlink(path)
+        self.assertIn('Real content', docs[0].page_content)
+
+    def test_source_metadata_set(self):
+        path = self._write_docx(['Hello'])
+        try:
+            from document_engine import _load_docx
+            docs = _load_docx(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(docs[0].metadata['source'], path)
+
+    def test_all_empty_returns_empty_list(self):
+        path = self._write_docx(['', ''])
+        try:
+            from document_engine import _load_docx
+            docs = _load_docx(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(docs, [])
+
+    def test_invalid_file_returns_empty(self):
+        from document_engine import _load_docx
+        self.assertEqual(_load_docx('/nonexistent/path/file.docx'), [])
+
+
+# ---------------------------------------------------------------------------
+# _enrich_page_numbers
+# ---------------------------------------------------------------------------
+
+class TestEnrichPageNumbers(unittest.TestCase):
+    def _make_doc(self, start_index, offsets_pages):
+        from langchain_core.documents import Document
+        return Document(
+            page_content='some text',
+            metadata={'start_index': start_index,
+                      '_page_offsets_json': json.dumps(offsets_pages)},
+        )
+
+    def test_assigns_correct_page(self):
+        from document_engine import _enrich_page_numbers
+        # Page 0 starts at 0, page 1 starts at 50
+        doc = self._make_doc(60, [[0, 0], [50, 1]])
+        result = _enrich_page_numbers([doc])
+        self.assertEqual(result[0].metadata['page'], 1)
+
+    def test_chunk_before_first_break_gets_page_zero(self):
+        from document_engine import _enrich_page_numbers
+        doc = self._make_doc(10, [[50, 1]])
+        result = _enrich_page_numbers([doc])
+        self.assertEqual(result[0].metadata['page'], 0)
+
+    def test_removes_temp_key(self):
+        from document_engine import _enrich_page_numbers
+        doc = self._make_doc(0, [[0, 0]])
+        result = _enrich_page_numbers([doc])
+        self.assertNotIn('_page_offsets_json', result[0].metadata)
+
+    def test_no_offsets_key_leaves_doc_unchanged(self):
+        from langchain_core.documents import Document
+        from document_engine import _enrich_page_numbers
+        doc = Document(page_content='hello', metadata={'start_index': 0})
+        result = _enrich_page_numbers([doc])
+        self.assertNotIn('page', result[0].metadata)
+
+    def test_empty_offsets_defaults_to_page_zero(self):
+        from document_engine import _enrich_page_numbers
+        doc = self._make_doc(0, [])
+        result = _enrich_page_numbers([doc])
+        self.assertEqual(result[0].metadata['page'], 0)
 
 
 # ---------------------------------------------------------------------------

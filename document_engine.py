@@ -22,9 +22,7 @@ from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
 from langchain_community.document_loaders import (
-    UnstructuredWordDocumentLoader,
     PyPDFLoader,
-    UnstructuredExcelLoader,
     CSVLoader,
     TextLoader
 )
@@ -102,6 +100,35 @@ def _enrich_line_numbers(splits: list) -> list:
         doc.metadata["line_start"] = bisect.bisect_right(offsets, start)
         doc.metadata["line_end"]   = bisect.bisect_right(offsets, max(end - 1, start))
     return splits
+
+
+def _enrich_page_numbers(splits: list) -> list:
+    """Add ``page`` (0-indexed) to splits from .docx files.
+
+    The loader stores a JSON-encoded list of [char_offset, page_0indexed] pairs
+    in ``_page_offsets_json``. This function uses bisect to find which page
+    each chunk starts on and removes the temporary key before ChromaDB storage.
+    """
+    import bisect
+    for doc in splits:
+        raw = doc.metadata.pop("_page_offsets_json", None)
+        if raw is None:
+            continue
+        try:
+            offsets_pages = json.loads(raw)
+        except Exception:
+            continue
+        if not offsets_pages:
+            doc.metadata.setdefault("page", 0)
+            continue
+        offsets = [op[0] for op in offsets_pages]
+        pages = [op[1] for op in offsets_pages]
+        start = doc.metadata.get("start_index", 0)
+        idx = bisect.bisect_right(offsets, start) - 1
+        doc.metadata["page"] = pages[idx] if idx >= 0 else 0
+    return splits
+
+
 INGESTION_QUEUE = queue.Queue()
 MANIFEST_LOCK = threading.Lock()
 INDEXED_FILES_PATH = os.path.join(CHROMA_DB_PATH, "indexed_files.txt")
@@ -116,6 +143,90 @@ def _get_embeddings() -> OllamaEmbeddings:
     if _EMBEDDINGS is None:
         _EMBEDDINGS = OllamaEmbeddings(model=EMBEDDING_MODEL)
     return _EMBEDDINGS
+
+
+def _load_docx(file_path: str) -> List[Document]:
+    """Load a .docx file using python-docx with explicit page-break tracking.
+
+    Walks every paragraph in document order, tracking page breaks via:
+      - ``w:pageBreakBefore`` paragraph property
+      - ``w:sectPr`` section break at the end of a paragraph
+      - ``w:br w:type="page"`` run-level page break
+
+    Returns a SINGLE Document containing all paragraph text joined by newlines.
+    Page-break character offsets are stored in ``_page_offsets_json`` metadata
+    (a JSON list of [char_offset, page_0indexed] pairs) so that
+    ``_enrich_page_numbers`` can assign the correct page to each split chunk.
+    Joining into one document lets the text splitter create chunks that span
+    paragraph boundaries, preventing short headings from becoming isolated chunks.
+    """
+    import docx as _docx
+    from docx.oxml.ns import qn
+
+    try:
+        doc = _docx.Document(file_path)
+    except Exception as e:
+        logger.error(f"Failed to open {file_path}: {e}")
+        return []
+
+    text_parts: list[str] = []
+    # Each entry: [char_offset_into_full_text, page_0indexed]
+    page_offsets: list[list[int]] = []
+    page = 1
+    current_pos = 0
+    prev_section_break = False
+
+    for para in doc.paragraphs:
+        p = para._p
+        pPr = p.find(qn('w:pPr'))
+
+        page_break_before = prev_section_break
+        prev_section_break = False
+
+        if pPr is not None:
+            pb_elem = pPr.find(qn('w:pageBreakBefore'))
+            if pb_elem is not None:
+                val = pb_elem.get(qn('w:val'), 'true')
+                if val.lower() not in ('false', '0', 'off'):
+                    page_break_before = True
+
+            sectPr = pPr.find(qn('w:sectPr'))
+            if sectPr is not None:
+                type_elem = sectPr.find(qn('w:type'))
+                break_type = (type_elem.get(qn('w:val'), 'nextPage')
+                              if type_elem is not None else 'nextPage')
+                if break_type in ('nextPage', 'evenPage', 'oddPage'):
+                    prev_section_break = True
+
+        if page_break_before:
+            page += 1
+            page_offsets.append([current_pos, page - 1])
+
+        has_run_break = any(
+            br.get(qn('w:type')) == 'page'
+            for br in p.findall('.//' + qn('w:br'))
+        )
+
+        text = para.text
+        if text.strip():
+            text_parts.append(text)
+            current_pos += len(text) + 1  # +1 for the joining newline
+
+        if has_run_break:
+            page += 1
+            page_offsets.append([current_pos, page - 1])
+
+    if not text_parts:
+        return []
+
+    full_text = '\n'.join(text_parts)
+    return [Document(
+        page_content=full_text,
+        metadata={
+            "source": file_path,
+            "_page_offsets_json": json.dumps(page_offsets),
+        },
+    )]
 
 
 def load_pdf(file_path: str) -> List[Document]:
@@ -162,17 +273,7 @@ def load_document_by_extension(file_path: str) -> List[Document]:
         if ext == '.pdf':
             return load_pdf(file_path)
         elif ext == '.docx':
-            loader = UnstructuredWordDocumentLoader(file_path, mode="elements")
-            docs = loader.load()
-            for i, doc in enumerate(docs):
-                # unstructured stores page numbers as 'page_number' (1-indexed);
-                # remap to 'page' (0-indexed) so _citation_location picks it up
-                if "page_number" in doc.metadata and "page" not in doc.metadata:
-                    pn = doc.metadata.pop("page_number")
-                    if pn is not None:
-                        doc.metadata["page"] = int(pn) - 1
-                doc.metadata["paragraph_index"] = i + 1
-            return docs
+            return _load_docx(file_path)
         elif ext == '.xlsx':
             return _load_xlsx(file_path)
         elif ext == '.csv':
@@ -371,6 +472,7 @@ def ingestion_worker():
                     if docs:
                         splits = text_splitter.split_documents(docs)
                         splits = _enrich_line_numbers(splits)
+                        splits = _enrich_page_numbers(splits)
                         # Read current tags from manifest and stamp onto each split
                         manifest_snap = _load_index_manifest()
                         for split in splits:
@@ -490,6 +592,7 @@ def initialize_vectorstore():
             )
             splits = text_splitter.split_documents(docs)
             splits = _enrich_line_numbers(splits)
+            splits = _enrich_page_numbers(splits)
             # Stamp tags from manifest onto each split
             for split in splits:
                 src = split.metadata.get("source", "")
