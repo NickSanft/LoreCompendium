@@ -3,6 +3,7 @@ import logging
 import queue
 import sys
 import time
+from collections import deque
 from datetime import datetime
 import discord
 import os
@@ -13,6 +14,7 @@ from conversation import ask_stuff
 from document_engine import (
     query_documents, query_documents_scoped, initialize_vectorstore,
     get_indexed_files, get_chunk_counts, get_duplicate_source, trigger_reindex,
+    COMPLETION_QUEUE,
 )
 from lore_utils import (
     get_key_from_json_config_file, MessageSource, DOC_FOLDER,
@@ -24,6 +26,13 @@ logger = logging.getLogger(__name__)
 _RATE_LIMIT_SECONDS = 10
 _MAX_QUERY_LENGTH = 500
 _user_last_query: dict[str, float] = {}
+
+# /lore conversation history: user_id -> deque of {"role", "content"} dicts
+_LORE_HISTORY_MAX_TURNS = 3  # Q&A pairs retained per user
+_lore_history: dict[str, deque] = {}
+
+# Maps uploaded filename -> channel so completion notifications can be sent there
+_file_upload_channels: dict[str, discord.abc.Messageable] = {}
 
 
 def _check_rate_limit(user_id: str) -> float:
@@ -131,6 +140,36 @@ async def _startup_init():
         logger.error(f"Failed to initialize vectorstore on startup: {e}")
 
 
+async def _poll_completion_queue():
+    """Poll COMPLETION_QUEUE and send indexing completion notifications to Discord."""
+    while True:
+        try:
+            while True:
+                try:
+                    item = COMPLETION_QUEUE.get_nowait()
+                except queue.Empty:
+                    break
+                action, file_path, success, chunk_count, error_msg = item
+                base = os.path.basename(file_path)
+                channel = _file_upload_channels.pop(base, None)
+                if channel is None:
+                    continue
+                if action == "delete":
+                    continue  # no user-facing notification for deletions
+                if success:
+                    noun = "chunk" if chunk_count == 1 else "chunks"
+                    msg = f"✅ `{base}` has been indexed ({chunk_count} {noun}) and is ready to query."
+                else:
+                    msg = f"❌ Failed to index `{base}`: {error_msg}"
+                try:
+                    await channel.send(msg)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.error(f"Completion queue poll error: {e}")
+        await asyncio.sleep(2.0)
+
+
 @client.event
 async def on_ready():
     logger.info(f"Logged in as {client.user}")
@@ -139,6 +178,7 @@ async def on_ready():
         logger.info("Created 'input' directory.")
 
     asyncio.create_task(_startup_init())
+    asyncio.create_task(_poll_completion_queue())
 
     try:
         synced = await client.tree.sync()
@@ -161,12 +201,15 @@ async def lore_slash(interaction: discord.Interaction, query: str):
             f"Please wait {remaining:.1f}s before sending another query.", ephemeral=True)
         return
 
+    user_id = str(interaction.user.id)
+    history = list(_lore_history.get(user_id, deque()))
+
     logger.info(f"Slash lore request from {interaction.user}: {query}")
     await interaction.response.defer(thinking=True)
 
     stream_q: queue.Queue = queue.Queue()
     query_task = asyncio.ensure_future(
-        asyncio.to_thread(query_documents, query, stream_queue=stream_q)
+        asyncio.to_thread(query_documents, query, stream_queue=stream_q, history=history)
     )
     await _stream_to_interaction(interaction, stream_q, query_task)
 
@@ -175,6 +218,15 @@ async def lore_slash(interaction: discord.Interaction, query: str):
     except Exception as e:
         logger.error(f"Lore query error: {e}")
         response = _classify_error(e)
+
+    # Store this turn in per-user history (strip sources footer first)
+    answer_for_history = response.split("\n\n---\n**Sources:**")[0].strip()
+    user_hist = _lore_history.setdefault(user_id, deque())
+    user_hist.append({"role": "user", "content": query})
+    user_hist.append({"role": "assistant", "content": answer_for_history})
+    while len(user_hist) > _LORE_HISTORY_MAX_TURNS * 2:
+        user_hist.popleft()
+
     await chunk_and_send(ctx=None, original_message=None, original_response=response, interaction=interaction)
 
 
@@ -302,6 +354,8 @@ async def on_message(message: discord.Message):
                 elif is_update:
                     notices.append(f"🔄 Updated existing file `{attachment.filename}`.")
 
+                # Register channel so we can send an indexing completion notification later
+                _file_upload_channels[attachment.filename] = message.channel
                 logger.info(f"Saved {'updated' if is_update else 'new'} file: {save_path}")
                 saved_count += 1
 
@@ -310,7 +364,7 @@ async def on_message(message: discord.Message):
             if notices:
                 lines.extend(notices)
             else:
-                lines.append("*These will be indexed shortly.*")
+                lines.append("*These will be indexed shortly. I'll let you know when it's ready.*")
             await message.channel.send("\n".join(lines))
             return
 

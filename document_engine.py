@@ -130,7 +130,47 @@ def _enrich_page_numbers(splits: list) -> list:
     return splits
 
 
+def _expand_doc_context(doc: Document, n_neighbors: int = 1) -> str:
+    """Return expanded context for a chunk by including neighboring chunks.
+
+    Fetches all chunks for the same source file from ChromaDB, sorts by
+    start_index, and returns the text of the target chunk plus up to
+    n_neighbors on each side joined by newlines.  Falls back to the
+    original chunk text if the vectorstore is unavailable or the chunk
+    cannot be located.
+    """
+    if GLOBAL_VECTORSTORE is None:
+        return doc.page_content
+    source = doc.metadata.get("source")
+    if not source:
+        return doc.page_content
+    try:
+        results = GLOBAL_VECTORSTORE.get(
+            where={"source": source},
+            include=["documents", "metadatas"],
+        )
+        pairs = list(zip(results.get("documents", []), results.get("metadatas", [])))
+        pairs.sort(key=lambda x: x[1].get("start_index", 0))
+        texts = [t for t, _ in pairs]
+        metas = [m for _, m in pairs]
+
+        target_start = doc.metadata.get("start_index", -1)
+        pos = next((i for i, m in enumerate(metas) if m.get("start_index") == target_start), None)
+        if pos is None:
+            pos = next((i for i, t in enumerate(texts) if t == doc.page_content), None)
+        if pos is None:
+            return doc.page_content
+
+        lo = max(0, pos - n_neighbors)
+        hi = min(len(texts) - 1, pos + n_neighbors)
+        return "\n".join(texts[lo:hi + 1])
+    except Exception:
+        return doc.page_content
+
+
 INGESTION_QUEUE = queue.Queue()
+# Completed ingestion events: (action, file_path, success, chunk_count, error_msg)
+COMPLETION_QUEUE: queue.Queue = queue.Queue()
 MANIFEST_LOCK = threading.Lock()
 INDEXED_FILES_PATH = os.path.join(CHROMA_DB_PATH, "indexed_files.txt")
 
@@ -456,8 +496,10 @@ def ingestion_worker():
                     GLOBAL_VECTORSTORE.delete(where={"source": file_path})
                     _update_manifest("delete", file_path)
                     logger.info(f"Removed chunks for {base_name}")
+                    COMPLETION_QUEUE.put(("delete", file_path, True, 0, None))
                 except Exception as e:
                     logger.error(f"Error deleting {file_path}: {e}")
+                    COMPLETION_QUEUE.put(("delete", file_path, False, 0, str(e)))
 
             elif action in ["add", "update"]:
                 # For update, we delete first to avoid duplicates
@@ -486,8 +528,14 @@ def ingestion_worker():
                             GLOBAL_VECTORSTORE.add_documents(splits)
                             _update_manifest("add", file_path)
                             logger.info(f"Added {len(splits)} chunks for {os.path.basename(file_path)}")
+                            COMPLETION_QUEUE.put(("add", file_path, True, len(splits), None))
+                        else:
+                            COMPLETION_QUEUE.put(("add", file_path, False, 0, "No chunks extracted"))
+                    else:
+                        COMPLETION_QUEUE.put(("add", file_path, False, 0, "No content loaded"))
                 except Exception as e:
                     logger.error(f"Error ingesting {file_path}: {e}")
+                    COMPLETION_QUEUE.put(("add", file_path, False, 0, str(e)))
 
             INGESTION_QUEUE.task_done()
 
@@ -765,6 +813,25 @@ multi_query_prompt = ChatPromptTemplate.from_messages(
 )
 multi_query_chain = multi_query_prompt | fast_llm | StrOutputParser()
 
+# Faithfulness checker — verifies generated answer is grounded in retrieved context
+class FaithfulnessScore(BaseModel):
+    """Binary faithfulness check for the generated answer."""
+    is_grounded: bool = Field(
+        description="True if every factual claim in the answer is directly supported by the provided context"
+    )
+
+
+faithfulness_system = (
+    "You are a faithfulness checker. Given a context and an answer, decide whether every "
+    "factual claim in the answer is directly supported by the context. "
+    "Return true only if the answer contains no facts that are absent from or contradict the context."
+)
+faithfulness_prompt = ChatPromptTemplate.from_messages([
+    ("system", faithfulness_system),
+    ("human", "Context:\n{context}\n\nAnswer:\n{answer}"),
+])
+faithfulness_check_chain = faithfulness_prompt | fast_llm.with_structured_output(FaithfulnessScore)
+
 
 # --- PART 3: GRAPH NODES (OPTIMIZED) ---
 
@@ -776,6 +843,7 @@ class GraphState(TypedDict):
     scoped_source: NotRequired[Optional[str]]         # None = search all documents
     stream_queue: NotRequired[Optional[queue.Queue]]  # queue for live token streaming
     tag_filter: NotRequired[Optional[str]]            # optional tag to restrict retrieval
+    history: NotRequired[Optional[list]]              # list of {"role", "content"} dicts
 
 
 def retrieve(state):
@@ -840,30 +908,58 @@ def grade_documents(state):
 def generate_rag(state):
     question = state["question"]
     documents = state["documents"]
+    history: list = state.get("history") or []
 
+    # Build context — expand each chunk with its neighbors for richer LLM input (item 2)
     formatted_context_list = []
     for i, doc in enumerate(documents):
         source_name = os.path.basename(doc.metadata.get("source", "Unknown"))
         location = _citation_location(doc.metadata)
         loc_str = f" ({location})" if location else ""
-        formatted_context_list.append(f"[{i + 1}] {source_name}{loc_str}\n{doc.page_content}")
+        expanded_text = _expand_doc_context(doc)
+        formatted_context_list.append(f"[{i + 1}] {source_name}{loc_str}\n{expanded_text}")
 
     full_context_string = "\n\n---\n\n".join(formatted_context_list)
+
+    # Prepend conversation history so the model can refer to prior turns (item 6)
+    history_prefix = ""
+    if history:
+        lines = [f"{t.get('role', 'user').capitalize()}: {t.get('content', '')}" for t in history]
+        history_prefix = "Previous conversation:\n" + "\n".join(lines) + "\n\n"
+    context_with_history = history_prefix + full_context_string
 
     sq: Optional[queue.Queue] = state.get("stream_queue")
 
     logger.debug(
         f"[GENERATE] → {THINKING_OLLAMA_MODEL}"
         f"\n  question : {question!r}"
+        f"\n  history  : {len(history)} turn(s)"
         f"\n  context  : {len(full_context_string)} chars across {len(documents)} chunk(s)"
         f"\n{full_context_string}"
     )
 
     generation = ""
-    for chunk in rag_chain.stream({"context": full_context_string, "question": question}):
+    for chunk in rag_chain.stream({"context": context_with_history, "question": question}):
         generation += chunk
         if sq is not None:
             sq.put(chunk)
+
+    # Faithfulness check — warn if any claims are unsupported by the retrieved context (item 3)
+    faithfulness_warning = ""
+    if documents:
+        try:
+            result = faithfulness_check_chain.invoke({"context": full_context_string, "answer": generation})
+            if not result.is_grounded:
+                faithfulness_warning = (
+                    "\n\n⚠️ *Note: Some claims in this answer may not be fully supported by the source material.*"
+                )
+        except Exception:
+            pass  # faithfulness check is best-effort; never block the response
+
+    if faithfulness_warning:
+        generation += faithfulness_warning
+        if sq is not None:
+            sq.put(faithfulness_warning)
 
     # Append a Sources section using page → line priority
     if documents:
@@ -971,7 +1067,8 @@ def _run_rag_graph(inputs: dict, include_sources: bool):
 
 def query_documents(user_input: str, include_sources: bool = False,
                     stream_queue: Optional[queue.Queue] = None,
-                    tag_filter: Optional[str] = None):
+                    tag_filter: Optional[str] = None,
+                    history: Optional[list] = None):
     """Search all indexed documents and return an answer."""
     if GLOBAL_VECTORSTORE is None:
         initialize_vectorstore()
@@ -980,6 +1077,8 @@ def query_documents(user_input: str, include_sources: bool = False,
         inputs["stream_queue"] = stream_queue
     if tag_filter:
         inputs["tag_filter"] = tag_filter
+    if history:
+        inputs["history"] = history
     return _run_rag_graph(inputs, include_sources)
 
 
