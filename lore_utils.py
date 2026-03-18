@@ -41,6 +41,23 @@ CHROMA_DB_PATH = "./chroma_store"
 CHROMA_COLLECTION_NAME = "word_docs_rag"
 
 
+def get_config() -> dict:
+    """Return the full contents of config.json as a dict."""
+    try:
+        with open(_CONFIG_PATH, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_config(updates: dict) -> None:
+    """Merge *updates* into config.json, preserving all other keys."""
+    existing = get_config()
+    existing.update(updates)
+    with open(_CONFIG_PATH, "w") as f:
+        json.dump(existing, f, indent=2)
+
+
 def setup_logging(level: int = logging.INFO) -> None:
     """Configure the root logger. Call once from the bot entry point."""
     logging.basicConfig(

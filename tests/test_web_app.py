@@ -600,5 +600,87 @@ class TestTagAPI(unittest.TestCase):
         self.assertEqual(captured["tags"].count("canon"), 1)
 
 
+# ---------------------------------------------------------------------------
+# Settings page
+# ---------------------------------------------------------------------------
+
+class TestSettingsPage(unittest.TestCase):
+    def setUp(self):
+        self.client = _make_client()
+        self._cfg = {
+            "role_description": "A helpful assistant",
+            "thinking_ollama_model": "gpt-oss",
+            "fast_ollama_model": "llama3.2",
+            "embedding_model": "mxbai-embed-large",
+        }
+
+    def test_settings_page_returns_200(self):
+        with patch("web_app.get_config", return_value=self._cfg):
+            r = self.client.get("/settings")
+        self.assertEqual(r.status_code, 200)
+
+    def test_settings_page_shows_all_fields(self):
+        with patch("web_app.get_config", return_value=self._cfg):
+            r = self.client.get("/settings")
+        self.assertIn('name="role_description"', r.text)
+        self.assertIn('name="thinking_ollama_model"', r.text)
+        self.assertIn('name="fast_ollama_model"', r.text)
+        self.assertIn('name="embedding_model"', r.text)
+
+    def test_settings_page_populates_values(self):
+        with patch("web_app.get_config", return_value=self._cfg):
+            r = self.client.get("/settings")
+        self.assertIn("gpt-oss", r.text)
+        self.assertIn("llama3.2", r.text)
+        self.assertIn("mxbai-embed-large", r.text)
+
+    def test_settings_in_nav(self):
+        with patch("web_app.get_config", return_value=self._cfg):
+            r = self.client.get("/settings")
+        self.assertIn('href="/settings"', r.text)
+
+    def test_save_calls_save_config_with_updates(self):
+        captured = {}
+        def fake_save(updates):
+            captured.update(updates)
+        with patch("web_app.save_config", side_effect=fake_save):
+            r = self.client.post("/settings", data={
+                "role_description": "New personality",
+                "thinking_ollama_model": "new-model",
+                "fast_ollama_model": "fast-model",
+                "embedding_model": "embed-model",
+            })
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("alert-success", r.text)
+        self.assertEqual(captured["thinking_ollama_model"], "new-model")
+        self.assertEqual(captured["role_description"], "New personality")
+
+    def test_save_empty_field_returns_422(self):
+        with patch("web_app.save_config"):
+            r = self.client.post("/settings", data={
+                "role_description": "ok",
+                "thinking_ollama_model": "",   # empty — should fail
+                "fast_ollama_model": "fast",
+                "embedding_model": "embed",
+            })
+        self.assertEqual(r.status_code, 422)
+        self.assertIn("alert-error", r.text)
+
+    def test_save_does_not_expose_discord_token(self):
+        """The settings endpoint must never write discord_bot_token."""
+        captured = {}
+        def fake_save(updates):
+            captured.update(updates)
+        with patch("web_app.save_config", side_effect=fake_save):
+            self.client.post("/settings", data={
+                "role_description": "ok",
+                "thinking_ollama_model": "m",
+                "fast_ollama_model": "m",
+                "embedding_model": "m",
+                "discord_bot_token": "leaked-token",  # injected field
+            })
+        self.assertNotIn("discord_bot_token", captured)
+
+
 if __name__ == "__main__":
     unittest.main()

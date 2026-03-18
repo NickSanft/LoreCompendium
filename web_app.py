@@ -32,7 +32,7 @@ from document_engine import (
     trigger_reindex,
     INGESTION_QUEUE,
 )
-from lore_utils import check_ollama_health, DOC_FOLDER, setup_logging, SUPPORTED_EXTENSIONS
+from lore_utils import check_ollama_health, DOC_FOLDER, setup_logging, SUPPORTED_EXTENSIONS, get_config, save_config
 
 logger = logging.getLogger(__name__)
 
@@ -298,6 +298,48 @@ async def chunks_data(filename: str, q: str = ""):
     env = templates.env
     t = env.get_template("partials/chunk_list.html")
     return HTMLResponse(t.render(chunks=chunks, query=q))
+
+
+@app.get("/settings")
+async def settings_page(request: Request):
+    cfg = get_config()
+    return templates.TemplateResponse(
+        request, "settings.html",
+        {
+            "active_page": "settings",
+            "role_description": cfg.get("role_description", ""),
+            "thinking_ollama_model": cfg.get("thinking_ollama_model", ""),
+            "fast_ollama_model": cfg.get("fast_ollama_model", ""),
+            "embedding_model": cfg.get("embedding_model", ""),
+        },
+    )
+
+
+_SETTINGS_FIELDS = {"role_description", "thinking_ollama_model", "fast_ollama_model", "embedding_model"}
+
+
+@app.post("/settings", response_class=HTMLResponse)
+async def settings_save(
+    role_description: str = Form(""),
+    thinking_ollama_model: str = Form(""),
+    fast_ollama_model: str = Form(""),
+    embedding_model: str = Form(""),
+):
+    updates = {
+        "role_description": role_description.strip(),
+        "thinking_ollama_model": thinking_ollama_model.strip(),
+        "fast_ollama_model": fast_ollama_model.strip(),
+        "embedding_model": embedding_model.strip(),
+    }
+    missing = [k for k, v in updates.items() if not v]
+    if missing:
+        labels = ", ".join(missing)
+        return HTMLResponse(
+            f'<div class="alert alert-error">These fields cannot be empty: {html_mod.escape(labels)}</div>',
+            status_code=422,
+        )
+    await asyncio.to_thread(save_config, updates)
+    return HTMLResponse('<div class="alert alert-success">Settings saved. Restart the server for changes to take effect.</div>')
 
 
 @app.get("/health")

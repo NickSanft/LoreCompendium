@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Settings — Lore Compendium{% endblock %}
+
+{% block content %}
+<div style="margin-bottom:1.25rem;">
+  <h1 class="page-title" style="margin-bottom:.2rem;">Settings</h1>
+  <p class="page-subtitle" style="margin-bottom:0;">
+    Edit runtime configuration. Changes take effect after restarting the server.
+  </p>
+</div>
+
+<div class="card" style="max-width:680px;">
+  <form hx-post="/settings"
+        hx-target="#settings-notice"
+        hx-swap="innerHTML">
+
+    <div id="settings-notice" style="margin-bottom:1rem;"></div>
+
+    <div class="form-group" style="margin-bottom:1.25rem;">
+      <label class="form-label" for="role_description">Bot personality / role description</label>
+      <textarea id="role_description" name="role_description"
+                class="form-control"
+                rows="4"
+                style="resize:vertical; font-family:inherit;">{{ role_description }}</textarea>
+      <p class="text-muted text-sm" style="margin-top:.3rem;">
+        Sets the system prompt used by the conversational agent.
+      </p>
+    </div>
+
+    <div class="form-group" style="margin-bottom:1.25rem;">
+      <label class="form-label" for="thinking_ollama_model">Thinking model</label>
+      <input id="thinking_ollama_model" name="thinking_ollama_model"
+             type="text" class="form-control"
+             value="{{ thinking_ollama_model }}"
+             placeholder="e.g. gpt-oss" />
+      <p class="text-muted text-sm" style="margin-top:.3rem;">
+        Used for final answer generation (slower, higher quality).
+      </p>
+    </div>
+
+    <div class="form-group" style="margin-bottom:1.25rem;">
+      <label class="form-label" for="fast_ollama_model">Fast model</label>
+      <input id="fast_ollama_model" name="fast_ollama_model"
+             type="text" class="form-control"
+             value="{{ fast_ollama_model }}"
+             placeholder="e.g. llama3.2" />
+      <p class="text-muted text-sm" style="margin-top:.3rem;">
+        Used for grading, query rewriting, and multi-query generation.
+      </p>
+    </div>
+
+    <div class="form-group" style="margin-bottom:1.5rem;">
+      <label class="form-label" for="embedding_model">Embedding model</label>
+      <input id="embedding_model" name="embedding_model"
+             type="text" class="form-control"
+             value="{{ embedding_model }}"
+             placeholder="e.g. mxbai-embed-large" />
+      <p class="text-muted text-sm" style="margin-top:.3rem;">
+        Changing this requires a full reindex — existing embeddings will be incompatible.
+      </p>
+    </div>
+
+    <div class="flex gap-1 items-center">
+      <button type="submit" class="btn btn-primary">Save settings</button>
+      <span class="htmx-indicator flex items-center gap-1">
+        <span class="spinner"></span>
+        <span class="text-muted text-sm">Saving…</span>
+      </span>
+    </div>
+
+  </form>
+</div>
+{% endblock %}
