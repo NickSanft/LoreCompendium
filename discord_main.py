@@ -194,7 +194,6 @@ async def lore_slash(interaction: discord.Interaction, query: str):
     if error:
         await interaction.response.send_message(error, ephemeral=True)
         return
-
     remaining = _check_rate_limit(str(interaction.user.id))
     if remaining > 0:
         await interaction.response.send_message(

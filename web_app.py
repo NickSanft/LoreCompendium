@@ -311,11 +311,13 @@ async def settings_page(request: Request):
             "thinking_ollama_model": cfg.get("thinking_ollama_model", ""),
             "fast_ollama_model": cfg.get("fast_ollama_model", ""),
             "embedding_model": cfg.get("embedding_model", ""),
+            "rerank_model": cfg.get("rerank_model", ""),
         },
     )
 
 
-_SETTINGS_FIELDS = {"role_description", "thinking_ollama_model", "fast_ollama_model", "embedding_model"}
+_SETTINGS_FIELDS = {"role_description", "thinking_ollama_model", "fast_ollama_model", "embedding_model", "rerank_model"}
+_OPTIONAL_SETTINGS = {"rerank_model"}  # these may legitimately be empty
 
 
 @app.post("/settings", response_class=HTMLResponse)
@@ -324,14 +326,16 @@ async def settings_save(
     thinking_ollama_model: str = Form(""),
     fast_ollama_model: str = Form(""),
     embedding_model: str = Form(""),
+    rerank_model: str = Form(""),
 ):
     updates = {
         "role_description": role_description.strip(),
         "thinking_ollama_model": thinking_ollama_model.strip(),
         "fast_ollama_model": fast_ollama_model.strip(),
         "embedding_model": embedding_model.strip(),
+        "rerank_model": rerank_model.strip(),
     }
-    missing = [k for k, v in updates.items() if not v]
+    missing = [k for k, v in updates.items() if not v and k not in _OPTIONAL_SETTINGS]
     if missing:
         labels = ", ".join(missing)
         return HTMLResponse(

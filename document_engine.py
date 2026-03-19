@@ -35,8 +35,10 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import END, StateGraph, START
 
+from rank_bm25 import BM25Okapi
+
 from lore_utils import CHROMA_COLLECTION_NAME, CHROMA_DB_PATH, THINKING_OLLAMA_MODEL, FAST_OLLAMA_MODEL, \
-    EMBEDDING_MODEL, SUPPORTED_EXTENSIONS, DOC_FOLDER
+    EMBEDDING_MODEL, RERANK_MODEL, SUPPORTED_EXTENSIONS, DOC_FOLDER
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +168,115 @@ def _expand_doc_context(doc: Document, n_neighbors: int = 1) -> str:
         return "\n".join(texts[lo:hi + 1])
     except Exception:
         return doc.page_content
+
+
+# --- BM25 INDEX (rebuilt in-memory after each ingestion) ---
+
+_BM25_INDEX = None          # rank_bm25.BM25Okapi instance
+_BM25_DOCS: list = []       # Document list parallel to the BM25 corpus
+_BM25_LOCK = threading.Lock()
+
+
+def _build_bm25_index() -> None:
+    """Rebuild the in-memory BM25 index from all documents currently in ChromaDB.
+
+    Called at the end of initialize_vectorstore() and after each ingestion in
+    the background worker so the index stays in sync with the vector store.
+    """
+    global _BM25_INDEX, _BM25_DOCS
+    if GLOBAL_VECTORSTORE is None:
+        return
+    try:
+        results = GLOBAL_VECTORSTORE.get(include=["documents", "metadatas"])
+        texts = results.get("documents") or []
+        metas = results.get("metadatas") or []
+        if not texts:
+            with _BM25_LOCK:
+                _BM25_INDEX = None
+                _BM25_DOCS = []
+            return
+        docs = [Document(page_content=t, metadata=m) for t, m in zip(texts, metas)]
+        tokenized = [t.lower().split() for t in texts]
+        index = BM25Okapi(tokenized)
+        with _BM25_LOCK:
+            _BM25_INDEX = index
+            _BM25_DOCS = docs
+        logger.debug(f"[BM25] Rebuilt index with {len(docs)} documents")
+    except Exception as e:
+        logger.warning(f"[BM25] Failed to build index: {e}")
+
+
+def _bm25_search(
+    query: str,
+    k: int = 8,
+    source_filter: Optional[str] = None,
+    tag_filter: Optional[str] = None,
+) -> list:
+    """Return up to k Documents from the BM25 index with positive scores."""
+    with _BM25_LOCK:
+        if _BM25_INDEX is None or not _BM25_DOCS:
+            return []
+        scores = _BM25_INDEX.get_scores(query.lower().split())
+        pairs = list(zip(scores, _BM25_DOCS))
+
+    if source_filter:
+        pairs = [(s, d) for s, d in pairs if d.metadata.get("source") == source_filter]
+    if tag_filter:
+        pairs = [(s, d) for s, d in pairs if tag_filter in d.metadata.get("tags", "")]
+
+    pairs.sort(key=lambda x: x[0], reverse=True)
+    return [d for s, d in pairs[:k] if s > 0]
+
+
+def _rrf_merge(ranked_lists: list, k: int = 60) -> list:
+    """Merge multiple ranked document lists using Reciprocal Rank Fusion.
+
+    A document appearing at rank r in a list contributes 1/(k+r+1) to its
+    total score. Documents appearing in multiple lists accumulate scores,
+    naturally promoting consistent results.
+    """
+    scores: dict[int, float] = {}
+    doc_map: dict[int, object] = {}
+    for lst in ranked_lists:
+        for rank, doc in enumerate(lst):
+            key = hash(doc.page_content)
+            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank + 1)
+            doc_map[key] = doc
+    return [doc_map[key] for key in sorted(scores, key=lambda x: scores[x], reverse=True)]
+
+
+def _rerank_documents(query: str, docs: list) -> list:
+    """Re-rank docs using Ollama's rerank API.
+
+    Returns docs in descending relevance order. Falls back to the original
+    order silently if RERANK_MODEL is not configured or the call fails.
+    """
+    if not RERANK_MODEL or not docs:
+        return docs
+    try:
+        import json as _json
+        import urllib.request as _urllib
+        payload = _json.dumps({
+            "model": RERANK_MODEL,
+            "query": query,
+            "documents": [d.page_content for d in docs],
+        }).encode()
+        req = _urllib.Request(
+            "http://localhost:11434/api/rerank",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with _urllib.urlopen(req, timeout=30) as resp:
+            data = _json.loads(resp.read())
+        results = data.get("results") or []
+        if not results:
+            return docs
+        ranked = sorted(results, key=lambda r: r.get("relevance_score", 0.0), reverse=True)
+        return [docs[r["index"]] for r in ranked if r["index"] < len(docs)]
+    except Exception as e:
+        logger.warning(f"[RERANK] {e}")
+        return docs
 
 
 INGESTION_QUEUE = queue.Queue()
@@ -537,6 +648,9 @@ def ingestion_worker():
                     logger.error(f"Error ingesting {file_path}: {e}")
                     COMPLETION_QUEUE.put(("add", file_path, False, 0, str(e)))
 
+            # Keep the BM25 index in sync after any change
+            _build_bm25_index()
+
             INGESTION_QUEUE.task_done()
 
         except Exception as e:
@@ -671,6 +785,9 @@ def initialize_vectorstore():
     _OBSERVER = Observer()
     _OBSERVER.schedule(event_handler, DOC_FOLDER, recursive=True)
     _OBSERVER.start()
+
+    # Build initial BM25 index from everything now in ChromaDB
+    _build_bm25_index()
 
     return vectorstore
 
@@ -866,18 +983,21 @@ def retrieve(state):
     queries = queries[:3]
     logger.debug(f"[RETRIEVE] {len(queries)} query variant(s): {queries}")
 
+    # Vector search: one ranked list per query variant
     retriever = get_retriever(k=4, source_filter=scoped_source, tag_filter=tag_filter)
-    seen: set[int] = set()
-    documents: List[Document] = []
-    for q in queries:
-        for doc in retriever.invoke(q):
-            key = hash(doc.page_content)
-            if key not in seen:
-                seen.add(key)
-                documents.append(doc)
+    vector_lists: list[list[Document]] = [list(retriever.invoke(q)) for q in queries]
+
+    # BM25 keyword search on the original question only
+    bm25_results = _bm25_search(question, k=8, source_filter=scoped_source, tag_filter=tag_filter)
+
+    # Merge all result lists with Reciprocal Rank Fusion
+    documents: List[Document] = _rrf_merge(vector_lists + [bm25_results])[:6]
+
+    # Optional cross-encoder reranking (only if RERANK_MODEL is configured)
+    documents = _rerank_documents(question, documents)
 
     sources = [os.path.basename(d.metadata.get("source", "?")) for d in documents]
-    logger.debug(f"[RETRIEVE] {len(documents)} unique doc(s) across {len(queries)} query/queries: {sources}")
+    logger.debug(f"[RETRIEVE] {len(documents)} doc(s) after hybrid+RRF (rerank={'on' if RERANK_MODEL else 'off'}): {sources}")
     return {"documents": documents, "question": question}
 
 

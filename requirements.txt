@@ -17,6 +17,8 @@ unstructured
 python-docx
 pypdf
 
+rank-bm25
+
 pytest
 
 fastapi[full]~=0.115.0

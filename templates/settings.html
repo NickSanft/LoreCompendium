@@ -49,7 +49,7 @@
       </p>
     </div>
 
-    <div class="form-group" style="margin-bottom:1.5rem;">
+    <div class="form-group" style="margin-bottom:1.25rem;">
       <label class="form-label" for="embedding_model">Embedding model</label>
       <input id="embedding_model" name="embedding_model"
              type="text" class="form-control"
@@ -57,6 +57,17 @@
              placeholder="e.g. mxbai-embed-large" />
       <p class="text-muted text-sm" style="margin-top:.3rem;">
         Changing this requires a full reindex — existing embeddings will be incompatible.
+      </p>
+    </div>
+
+    <div class="form-group" style="margin-bottom:1.5rem;">
+      <label class="form-label" for="rerank_model">Rerank model <span class="text-muted text-sm">(optional)</span></label>
+      <input id="rerank_model" name="rerank_model"
+             type="text" class="form-control"
+             value="{{ rerank_model }}"
+             placeholder="e.g. mxbai-rerank-large (leave blank to disable)" />
+      <p class="text-muted text-sm" style="margin-top:.3rem;">
+        If set, retrieved chunks are reordered by a cross-encoder before generation. Run <code>ollama pull mxbai-rerank-large</code> first.
       </p>
     </div>
 
