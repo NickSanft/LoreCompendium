@@ -14,6 +14,7 @@ from conversation import ask_stuff
 from document_engine import (
     query_documents, query_documents_scoped, initialize_vectorstore,
     get_indexed_files, get_chunk_counts, get_duplicate_source, trigger_reindex,
+    similarity_search, _format_location,
     COMPLETION_QUEUE,
 )
 from lore_utils import (
@@ -271,6 +272,54 @@ async def ask_filename_autocomplete(
     return [app_commands.Choice(name=f, value=f) for f in matches[:25]]
 
 
+@client.tree.command(name="search", description="Preview raw matching chunks without generating an answer")
+@app_commands.describe(query="Text to search for", filename="Restrict to a specific document (optional)")
+async def search_slash(interaction: discord.Interaction, query: str, filename: str = ""):
+    error = _validate_query(query)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    source_filter = None
+    if filename:
+        manifest = get_indexed_files()
+        matching = [p for p in manifest if os.path.basename(p) == filename]
+        if not matching:
+            await interaction.followup.send(f"No indexed document named `{filename}`.", ephemeral=True)
+            return
+        source_filter = matching[0]
+
+    results = await asyncio.to_thread(similarity_search, query, 5, source_filter)
+    if not results:
+        await interaction.followup.send("No matching chunks found.", ephemeral=True)
+        return
+
+    lines = [f"**Search results for** `{query}`\n"]
+    for i, (doc, score) in enumerate(results, 1):
+        fname = os.path.basename(doc.metadata.get("source", "?"))
+        loc = _format_location(doc.metadata)
+        loc_str = f" — {loc}" if loc else ""
+        snippet = doc.page_content[:200].replace("\n", " ").strip()
+        if len(doc.page_content) > 200:
+            snippet += "…"
+        lines.append(f"**{i}. {fname}**{loc_str} *(score: {score:.2f})*\n> {snippet}\n")
+
+    for chunk in split_into_chunks("\n".join(lines)):
+        await interaction.followup.send(chunk, ephemeral=True)
+
+
+@search_slash.autocomplete("filename")
+async def search_filename_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    indexed = get_indexed_files()
+    filenames = sorted({os.path.basename(p) for p in indexed})
+    matches = [f for f in filenames if current.lower() in f.lower()]
+    return [app_commands.Choice(name=f, value=f) for f in matches[:25]]
+
+
 @client.tree.command(name="help", description="Show available bot commands")
 async def help_slash(interaction: discord.Interaction):
     supported = ", ".join(SUPPORTED_EXTENSIONS)
@@ -278,6 +327,7 @@ async def help_slash(interaction: discord.Interaction):
         "**Lore Compendium Commands**\n\n"
         "`/lore <query>` — Search all indexed documents for an answer\n"
         "`/ask <filename> <query>` — Search within a specific document (filename autocompletes)\n"
+        "`/search <query> [filename]` — Preview raw matching chunks without LLM generation\n"
         "`/status` — Show which documents are currently indexed\n"
         "`/reindex` — Force a re-scan of the input folder\n"
         "`/help` — Show this message\n\n"

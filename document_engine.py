@@ -1198,6 +1198,50 @@ app = workflow.compile()
 
 # --- ENTRY POINTS ---
 
+_QUERY_CACHE: dict[str, tuple] = {}
+_CACHE_TTL_SECONDS = 3600  # cached answers expire after 1 hour
+
+
+def _manifest_hash() -> str:
+    """Return a short hash of the current index manifest.
+
+    Used as part of the cache key so that cached answers are automatically
+    invalidated whenever documents are added, removed, or updated.
+    """
+    raw = json.dumps(_load_index_manifest(), sort_keys=True)
+    return hashlib.md5(raw.encode()).hexdigest()
+
+
+def _make_cache_key(
+    query: str,
+    scoped_source: Optional[str],
+    tag_filter: Optional[str],
+    history: Optional[list],
+    include_sources: bool,
+) -> str:
+    parts = json.dumps(
+        {"q": query, "s": scoped_source, "t": tag_filter,
+         "h": history, "m": _manifest_hash(), "i": include_sources},
+        sort_keys=True,
+    )
+    return hashlib.md5(parts.encode()).hexdigest()
+
+
+def _cache_get(key: str):
+    entry = _QUERY_CACHE.get(key)
+    if entry is None:
+        return None
+    result, ts = entry
+    if time.time() - ts > _CACHE_TTL_SECONDS:
+        _QUERY_CACHE.pop(key, None)
+        return None
+    return result
+
+
+def _cache_put(key: str, result) -> None:
+    _QUERY_CACHE[key] = (result, time.time())
+
+
 def _run_rag_graph(inputs: dict, include_sources: bool):
     """Execute the compiled RAG graph and return a formatted answer."""
     config = {"recursion_limit": 25}
@@ -1245,6 +1289,16 @@ def query_documents(user_input: str, include_sources: bool = False,
     """Search all indexed documents and return an answer."""
     if GLOBAL_VECTORSTORE is None:
         initialize_vectorstore()
+
+    key = _make_cache_key(user_input, None, tag_filter, history, include_sources)
+    cached = _cache_get(key)
+    if cached is not None:
+        logger.debug(f"[CACHE] HIT: {user_input!r}")
+        if stream_queue is not None:
+            stream_queue.put(cached["answer"] if include_sources else cached)
+            stream_queue.put(None)
+        return cached
+
     inputs: dict = {"question": user_input, "loop_step": 0}
     if stream_queue is not None:
         inputs["stream_queue"] = stream_queue
@@ -1252,7 +1306,9 @@ def query_documents(user_input: str, include_sources: bool = False,
         inputs["tag_filter"] = tag_filter
     if history:
         inputs["history"] = history
-    return _run_rag_graph(inputs, include_sources)
+    result = _run_rag_graph(inputs, include_sources)
+    _cache_put(key, result)
+    return result
 
 
 def query_documents_scoped(user_input: str, filename: str, include_sources: bool = False,
@@ -1276,12 +1332,23 @@ def query_documents_scoped(user_input: str, filename: str, include_sources: bool
         msg = f"No indexed document named '{filename}' found. Use `/status` to see available documents."
         return {"answer": msg, "citations": []} if include_sources else msg
 
+    key = _make_cache_key(user_input, matching[0], tag_filter, None, include_sources)
+    cached = _cache_get(key)
+    if cached is not None:
+        logger.debug(f"[CACHE] HIT: {user_input!r} (scoped: {filename})")
+        if stream_queue is not None:
+            stream_queue.put(cached["answer"] if include_sources else cached)
+            stream_queue.put(None)
+        return cached
+
     inputs: dict = {"question": user_input, "loop_step": 0, "scoped_source": matching[0]}
     if stream_queue is not None:
         inputs["stream_queue"] = stream_queue
     if tag_filter:
         inputs["tag_filter"] = tag_filter
-    return _run_rag_graph(inputs, include_sources)
+    result = _run_rag_graph(inputs, include_sources)
+    _cache_put(key, result)
+    return result
 
 
 def similarity_search(

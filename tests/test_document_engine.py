@@ -445,6 +445,10 @@ class TestEnrichPageNumbers(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestQueryDocuments(unittest.TestCase):
+    def setUp(self):
+        import document_engine
+        document_engine._QUERY_CACHE.clear()
+
     def _make_stream_output(self, generation="Test answer", docs=None):
         """Build the sequence of dicts that app.stream would yield."""
         if docs is None:
@@ -755,6 +759,10 @@ class TestGetDuplicateSource(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestQueryDocumentsScoped(unittest.TestCase):
+    def setUp(self):
+        import document_engine
+        document_engine._QUERY_CACHE.clear()
+
     def _make_stream_output(self, generation="Scoped answer"):
         from langchain_core.documents import Document
         doc = Document(page_content="chunk", metadata={"source": "/input/lore.txt", "start_index": 0})
@@ -1201,6 +1209,98 @@ class TestEnrichLineNumbers(unittest.TestCase):
         doc = Document(page_content="hello", metadata={"start_index": 0})
         result = _enrich_line_numbers([doc])
         self.assertNotIn("line_start", result[0].metadata)
+
+
+class TestQueryCache(unittest.TestCase):
+    def setUp(self):
+        import document_engine
+        document_engine._QUERY_CACHE.clear()
+
+    def _make_key(self, query="hello", scoped=None, tag=None, history=None, inc=False):
+        from document_engine import _make_cache_key
+        return _make_cache_key(query, scoped, tag, history, inc)
+
+    def test_cache_miss_returns_none(self):
+        from document_engine import _cache_get
+        self.assertIsNone(_cache_get("nonexistent_key"))
+
+    def test_cache_put_then_get_returns_value(self):
+        from document_engine import _cache_get, _cache_put
+        _cache_put("k1", "answer")
+        self.assertEqual(_cache_get("k1"), "answer")
+
+    def test_cache_ttl_expires(self):
+        import time, document_engine
+        from document_engine import _cache_get, _cache_put
+        _cache_put("k2", "answer")
+        # Artificially age the entry beyond TTL
+        document_engine._QUERY_CACHE["k2"] = ("answer", time.time() - document_engine._CACHE_TTL_SECONDS - 1)
+        self.assertIsNone(_cache_get("k2"))
+        self.assertNotIn("k2", document_engine._QUERY_CACHE)
+
+    def test_different_queries_have_different_keys(self):
+        k1 = self._make_key("question one")
+        k2 = self._make_key("question two")
+        self.assertNotEqual(k1, k2)
+
+    def test_same_query_different_scoped_source_different_key(self):
+        k1 = self._make_key("q", scoped=None)
+        k2 = self._make_key("q", scoped="/some/file.docx")
+        self.assertNotEqual(k1, k2)
+
+    def test_same_query_different_include_sources_different_key(self):
+        k1 = self._make_key("q", inc=False)
+        k2 = self._make_key("q", inc=True)
+        self.assertNotEqual(k1, k2)
+
+    def test_query_documents_returns_cached_result(self):
+        from unittest.mock import patch
+        import document_engine
+        from document_engine import _cache_put, _make_cache_key, _manifest_hash
+
+        key = _make_cache_key("cached_query", None, None, None, False)
+        _cache_put(key, "cached answer")
+
+        with patch("document_engine._run_rag_graph") as mock_graph:
+            with patch("document_engine.GLOBAL_VECTORSTORE", new=object()):
+                result = document_engine.query_documents("cached_query")
+        mock_graph.assert_not_called()
+        self.assertEqual(result, "cached answer")
+
+    def test_query_documents_stores_result_in_cache(self):
+        from unittest.mock import patch, MagicMock
+        import document_engine
+
+        with patch("document_engine._run_rag_graph", return_value="fresh answer") as mock_graph:
+            with patch("document_engine.GLOBAL_VECTORSTORE", new=object()):
+                result = document_engine.query_documents("fresh_query_xyz")
+        mock_graph.assert_called_once()
+        self.assertEqual(result, "fresh answer")
+        # Second call should hit cache
+        with patch("document_engine._run_rag_graph") as mock_graph2:
+            with patch("document_engine.GLOBAL_VECTORSTORE", new=object()):
+                result2 = document_engine.query_documents("fresh_query_xyz")
+        mock_graph2.assert_not_called()
+        self.assertEqual(result2, "fresh answer")
+
+    def test_cache_hit_sends_to_stream_queue(self):
+        import queue as q_module
+        from unittest.mock import patch
+        import document_engine
+        from document_engine import _cache_put, _make_cache_key
+
+        key = _make_cache_key("stream_query", None, None, None, False)
+        _cache_put(key, "streamed answer")
+
+        sq = q_module.Queue()
+        with patch("document_engine.GLOBAL_VECTORSTORE", new=object()):
+            document_engine.query_documents("stream_query", stream_queue=sq)
+
+        chunks = []
+        while not sq.empty():
+            chunks.append(sq.get_nowait())
+        self.assertEqual(chunks[0], "streamed answer")
+        self.assertIsNone(chunks[1])  # sentinel
 
 
 if __name__ == "__main__":
