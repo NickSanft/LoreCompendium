@@ -18,6 +18,7 @@ python-docx
 pypdf
 
 rank-bm25
+langchain-experimental
 
 pytest
 

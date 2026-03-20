@@ -28,7 +28,6 @@ from langchain_community.document_loaders import (
     TextLoader
 )
 from langchain_community.vectorstores.utils import filter_complex_metadata
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
@@ -36,6 +35,8 @@ from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import END, StateGraph, START
 
 from rank_bm25 import BM25Okapi
+from langchain_experimental.text_splitter import SemanticChunker
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from lore_utils import CHROMA_COLLECTION_NAME, CHROMA_DB_PATH, THINKING_OLLAMA_MODEL, FAST_OLLAMA_MODEL, \
     EMBEDDING_MODEL, RERANK_MODEL, SUPPORTED_EXTENSIONS, DOC_FOLDER
@@ -295,6 +296,68 @@ def _get_embeddings() -> OllamaEmbeddings:
     if _EMBEDDINGS is None:
         _EMBEDDINGS = OllamaEmbeddings(model=EMBEDDING_MODEL)
     return _EMBEDDINGS
+
+
+_CHAR_SPLITTER = RecursiveCharacterTextSplitter(
+    chunk_size=1000, chunk_overlap=200, add_start_index=True
+)
+
+
+def _get_semantic_splitter() -> SemanticChunker:
+    """Return a SemanticChunker that splits at topic boundaries using the shared embeddings model.
+
+    Uses percentile-based breakpoint detection, which splits wherever the cosine
+    distance between adjacent sentence embeddings exceeds the 95th-percentile
+    threshold for the document.  The sentence-split regex includes newlines so
+    that long paragraphs are broken into embeddable pieces before the embedding
+    step, avoiding 400 errors from models with a short context window (e.g.
+    mxbai-embed-large at 512 tokens).  ``min_chunk_size=200`` prevents orphan
+    fragments.  ``add_start_index=True`` preserves character offsets so
+    page/line enrichment continues to work.
+    """
+    return SemanticChunker(
+        embeddings=_get_embeddings(),
+        add_start_index=True,
+        breakpoint_threshold_type="percentile",
+        min_chunk_size=200,
+        sentence_split_regex=r"(?<=[.?!])\s+|\n+",
+    )
+
+
+# mxbai-embed-large has a 512-token context; at ~4 chars/token that is ~2048 chars.
+# We use a conservative limit so chunks are safely within bounds.
+_MAX_EMBED_CHARS = 1500
+
+
+def _split_documents(docs: list) -> list:
+    """Split documents using SemanticChunker with a hard size ceiling.
+
+    For each document, semantic chunking is attempted first. If it raises
+    (e.g. an individual sentence still exceeds the embedding context window),
+    that document falls back to character-based splitting.
+
+    After semantic splitting, any chunk that exceeds _MAX_EMBED_CHARS is
+    re-split with RecursiveCharacterTextSplitter so that no chunk sent to
+    ChromaDB's add_documents() can trigger a 400 from the embedding model.
+    """
+    semantic = _get_semantic_splitter()
+    raw: list = []
+    for doc in docs:
+        try:
+            raw.extend(semantic.split_documents([doc]))
+        except Exception as e:
+            src = os.path.basename(doc.metadata.get("source", "?"))
+            logger.warning(f"Semantic chunking failed for {src} ({e}); using character split")
+            raw.extend(_CHAR_SPLITTER.split_documents([doc]))
+
+    # Second pass: enforce the embedding context limit
+    final: list = []
+    for chunk in raw:
+        if len(chunk.page_content) > _MAX_EMBED_CHARS:
+            final.extend(_CHAR_SPLITTER.split_documents([chunk]))
+        else:
+            final.append(chunk)
+    return final
 
 
 def _load_docx(file_path: str) -> List[Document]:
@@ -576,12 +639,6 @@ def ingestion_worker():
     """
     global GLOBAL_VECTORSTORE
 
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
-        add_start_index=True
-    )
-
     while True:
         try:
             # Block until an item is available; None is the shutdown sentinel
@@ -624,7 +681,7 @@ def ingestion_worker():
                 try:
                     docs = load_document_by_extension(file_path)
                     if docs:
-                        splits = text_splitter.split_documents(docs)
+                        splits = _split_documents(docs)
                         splits = _enrich_line_numbers(splits)
                         splits = _enrich_page_numbers(splits)
                         # Read current tags from manifest and stamp onto each split
@@ -748,12 +805,7 @@ def initialize_vectorstore():
 
         if docs:
             logger.info(f"Splitting & embedding {len(docs)} document chunk(s)")
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=1000,
-                chunk_overlap=200,
-                add_start_index=True
-            )
-            splits = text_splitter.split_documents(docs)
+            splits = _split_documents(docs)
             splits = _enrich_line_numbers(splits)
             splits = _enrich_page_numbers(splits)
             # Stamp tags from manifest onto each split
@@ -1011,7 +1063,8 @@ def grade_documents(state):
         return {"documents": [], "question": question}
 
     batch_inputs = [{"question": question, "document": d.page_content} for d in documents]
-    scores = grader_chain.batch(batch_inputs)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(batch_inputs)) as pool:
+        scores = list(pool.map(grader_chain.invoke, batch_inputs))
 
     filtered_docs = []
     for i, score in enumerate(scores):
