@@ -447,7 +447,7 @@ class TestEnrichPageNumbers(unittest.TestCase):
 class TestQueryDocuments(unittest.TestCase):
     def setUp(self):
         import document_engine
-        document_engine._QUERY_CACHE.clear()
+        document_engine._cache_clear()
 
     def _make_stream_output(self, generation="Test answer", docs=None):
         """Build the sequence of dicts that app.stream would yield."""
@@ -761,7 +761,7 @@ class TestGetDuplicateSource(unittest.TestCase):
 class TestQueryDocumentsScoped(unittest.TestCase):
     def setUp(self):
         import document_engine
-        document_engine._QUERY_CACHE.clear()
+        document_engine._cache_clear()
 
     def _make_stream_output(self, generation="Scoped answer"):
         from langchain_core.documents import Document
@@ -1214,7 +1214,7 @@ class TestEnrichLineNumbers(unittest.TestCase):
 class TestQueryCache(unittest.TestCase):
     def setUp(self):
         import document_engine
-        document_engine._QUERY_CACHE.clear()
+        document_engine._cache_clear()
 
     def _make_key(self, query="hello", scoped=None, tag=None, history=None, inc=False):
         from document_engine import _make_cache_key
@@ -1231,12 +1231,24 @@ class TestQueryCache(unittest.TestCase):
 
     def test_cache_ttl_expires(self):
         import time, document_engine
-        from document_engine import _cache_get, _cache_put
+        from document_engine import _cache_get, _cache_put, _CACHE_CONN_LOCK, _get_cache_conn
+
         _cache_put("k2", "answer")
-        # Artificially age the entry beyond TTL
-        document_engine._QUERY_CACHE["k2"] = ("answer", time.time() - document_engine._CACHE_TTL_SECONDS - 1)
+        # Age the entry beyond the TTL directly in SQLite
+        with _CACHE_CONN_LOCK:
+            conn = _get_cache_conn()
+            conn.execute(
+                "UPDATE query_cache SET created_at = ? WHERE key = ?",
+                (time.time() - document_engine._CACHE_TTL_SECONDS - 1, "k2"),
+            )
+            conn.commit()
         self.assertIsNone(_cache_get("k2"))
-        self.assertNotIn("k2", document_engine._QUERY_CACHE)
+        # Expired entry should be pruned
+        with _CACHE_CONN_LOCK:
+            row = _get_cache_conn().execute(
+                "SELECT key FROM query_cache WHERE key = ?", ("k2",)
+            ).fetchone()
+        self.assertIsNone(row)
 
     def test_different_queries_have_different_keys(self):
         k1 = self._make_key("question one")

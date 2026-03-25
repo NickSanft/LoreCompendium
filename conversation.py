@@ -1,5 +1,6 @@
 import logging
 import re
+import queue as _queue_module
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
@@ -13,6 +14,8 @@ import document_engine
 from lore_utils import MessageSource, SYSTEM_DESCRIPTION, THINKING_OLLAMA_MODEL
 
 logger = logging.getLogger(__name__)
+
+_stream_queues: dict[str, _queue_module.Queue] = {}
 
 CONVERSATION_NODE = "conversation"
 MAX_HISTORY_MESSAGES = 20  # retain the last ~10 exchanges to cap memory growth
@@ -72,18 +75,28 @@ def conversation(state: MessagesState, config: RunnableConfig):
     # Pass the full accumulated history so the inner agent has conversation context
     inputs = {"messages": [("system", get_system_description())] + messages}
 
+    sq = _stream_queues.get(user_id_clean := config.get("configurable", {}).get("user_id", ""))
     final_state = None
 
-    for s in conversation_react_agent.stream(inputs, config=get_config_values(config), stream_mode="values"):
-        final_state = s
+    if sq is not None:
+        from langchain_core.messages import AIMessageChunk
+        streamed_text = ""
+        for chunk, metadata in conversation_react_agent.stream(
+            inputs, config=get_config_values(config), stream_mode="messages"
+        ):
+            if isinstance(chunk, AIMessageChunk) and chunk.content and not chunk.tool_call_chunks:
+                streamed_text += chunk.content
+                sq.put(chunk.content)
+        resp = streamed_text
+    else:
+        for s in conversation_react_agent.stream(inputs, config=get_config_values(config), stream_mode="values"):
+            final_state = s
+            if "messages" in s and s["messages"]:
+                latest = s["messages"][-1]
+                if hasattr(latest, 'tool_calls') and latest.tool_calls:
+                    logger.debug(f"Tool calls: {[tc.get('name', '') for tc in latest.tool_calls]}")
+        resp = final_state["messages"][-1].content if final_state and "messages" in final_state else ""
 
-        # Check for tool calls in the latest message
-        if "messages" in s and s["messages"]:
-            latest = s["messages"][-1]
-            if hasattr(latest, 'tool_calls') and latest.tool_calls:
-                logger.debug(f"Tool calls: {[tc.get('name', '') for tc in latest.tool_calls]}")
-
-    resp = final_state["messages"][-1].content if final_state and "messages" in final_state else ""
     return {'messages': [resp]}
 
 
@@ -106,34 +119,40 @@ def format_prompt(prompt: str, source: MessageSource, user_id: str) -> str:
     """
 
 
-def ask_stuff(base_prompt: str, user_id: str, source: MessageSource) -> str:
-    user_id_clean = re.sub(r'[^a-zA-Z0-9]', '', user_id)  # Clean special characters
+def ask_stuff(base_prompt: str, user_id: str, source: MessageSource, stream_queue=None) -> str:
+    user_id_clean = re.sub(r'[^a-zA-Z0-9]', '', user_id)
     full_prompt = format_prompt(base_prompt, source, user_id_clean)
 
     logger.debug(f"[CONVERSATION] → {THINKING_OLLAMA_MODEL}"
                  f"\n  system : {get_system_description()}"
                  f"\n  prompt : {full_prompt}")
 
-    config = {
-        "configurable": {"user_id": user_id_clean, "thread_id": user_id_clean}
-    }
-    inputs = {"messages": [("user", full_prompt)]}
+    if stream_queue is not None:
+        _stream_queues[user_id_clean] = stream_queue
 
-    final_state = None
-    for s in app.stream(inputs, config=config, stream_mode="values"):
-        final_state = s
-        message = s["messages"][-1] if "messages" in s and s["messages"] else None
-        if message:
-            content = message[1] if isinstance(message, tuple) else getattr(message, "content", str(message))
-            logger.debug(f"[CONVERSATION] ← message: {content!r}")
+    try:
+        config = {"configurable": {"user_id": user_id_clean, "thread_id": user_id_clean}}
+        inputs = {"messages": [("user", full_prompt)]}
 
-    final_text = ""
-    if final_state and "messages" in final_state and final_state["messages"]:
-        last_msg = final_state["messages"][-1]
-        final_text = last_msg.content if hasattr(last_msg, 'content') else str(last_msg)
+        final_state = None
+        for s in app.stream(inputs, config=config, stream_mode="values"):
+            final_state = s
+            message = s["messages"][-1] if "messages" in s and s["messages"] else None
+            if message:
+                content = message[1] if isinstance(message, tuple) else getattr(message, "content", str(message))
+                logger.debug(f"[CONVERSATION] ← message: {content!r}")
 
-    logger.debug(f"[CONVERSATION] final response: {final_text!r}")
-    return final_text
+        final_text = ""
+        if final_state and "messages" in final_state and final_state["messages"]:
+            last_msg = final_state["messages"][-1]
+            final_text = last_msg.content if hasattr(last_msg, 'content') else str(last_msg)
+
+        logger.debug(f"[CONVERSATION] final response: {final_text!r}")
+        return final_text
+    finally:
+        _stream_queues.pop(user_id_clean, None)
+        if stream_queue is not None:
+            stream_queue.put(None)  # sentinel
 
 
 ollama_instance = ChatOllama(model=THINKING_OLLAMA_MODEL)

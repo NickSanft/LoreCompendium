@@ -6,6 +6,7 @@ import time
 import queue
 import threading
 import json
+import sqlite3
 from typing import List, NotRequired, Optional
 import msoffcrypto  # noqa
 import openpyxl  # noqa
@@ -1198,8 +1199,35 @@ app = workflow.compile()
 
 # --- ENTRY POINTS ---
 
-_QUERY_CACHE: dict[str, tuple] = {}
 _CACHE_TTL_SECONDS = 3600  # cached answers expire after 1 hour
+_CACHE_DB_PATH = os.path.join(CHROMA_DB_PATH, "query_cache.db")
+_CACHE_CONN: Optional["sqlite3.Connection"] = None
+_CACHE_CONN_LOCK = threading.Lock()
+
+
+def _get_cache_conn():
+    """Return the shared SQLite cache connection, creating it on first call."""
+    global _CACHE_CONN
+    if _CACHE_CONN is None:
+        os.makedirs(CHROMA_DB_PATH, exist_ok=True)
+        _CACHE_CONN = sqlite3.connect(_CACHE_DB_PATH, check_same_thread=False)
+        _CACHE_CONN.execute(
+            "CREATE TABLE IF NOT EXISTS query_cache "
+            "(key TEXT PRIMARY KEY, result TEXT NOT NULL, created_at REAL NOT NULL)"
+        )
+        _CACHE_CONN.commit()
+    return _CACHE_CONN
+
+
+def _cache_clear() -> None:
+    """Remove all entries from the persistent query cache. Used in tests and admin ops."""
+    try:
+        with _CACHE_CONN_LOCK:
+            conn = _get_cache_conn()
+            conn.execute("DELETE FROM query_cache")
+            conn.commit()
+    except Exception as e:
+        logger.warning(f"[CACHE] Clear error: {e}")
 
 
 def _manifest_hash() -> str:
@@ -1228,18 +1256,38 @@ def _make_cache_key(
 
 
 def _cache_get(key: str):
-    entry = _QUERY_CACHE.get(key)
-    if entry is None:
+    try:
+        with _CACHE_CONN_LOCK:
+            row = _get_cache_conn().execute(
+                "SELECT result, created_at FROM query_cache WHERE key = ?", (key,)
+            ).fetchone()
+        if row is None:
+            return None
+        result_json, ts = row
+        if time.time() - ts > _CACHE_TTL_SECONDS:
+            with _CACHE_CONN_LOCK:
+                conn = _get_cache_conn()
+                conn.execute("DELETE FROM query_cache WHERE key = ?", (key,))
+                conn.commit()
+            return None
+        return json.loads(result_json)
+    except Exception as e:
+        logger.warning(f"[CACHE] Read error: {e}")
         return None
-    result, ts = entry
-    if time.time() - ts > _CACHE_TTL_SECONDS:
-        _QUERY_CACHE.pop(key, None)
-        return None
-    return result
 
 
 def _cache_put(key: str, result) -> None:
-    _QUERY_CACHE[key] = (result, time.time())
+    try:
+        result_json = json.dumps(result)
+        with _CACHE_CONN_LOCK:
+            conn = _get_cache_conn()
+            conn.execute(
+                "INSERT OR REPLACE INTO query_cache (key, result, created_at) VALUES (?, ?, ?)",
+                (key, result_json, time.time()),
+            )
+            conn.commit()
+    except Exception as e:
+        logger.warning(f"[CACHE] Write error: {e}")
 
 
 def _run_rag_graph(inputs: dict, include_sources: bool):

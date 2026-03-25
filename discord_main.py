@@ -118,6 +118,48 @@ async def _stream_to_interaction(
         await asyncio.sleep(0.05)
 
 
+async def _stream_to_message(
+    msg: discord.Message,
+    stream_q: queue.Queue,
+    query_task: asyncio.Task,
+) -> None:
+    """Drain stream_q and progressively edit a Discord message."""
+    accumulated = ""
+    last_edit = 0.0
+
+    while True:
+        got_chunk = False
+        while True:
+            try:
+                chunk = stream_q.get_nowait()
+            except queue.Empty:
+                break
+            if chunk is None:
+                if accumulated:
+                    try:
+                        await msg.edit(content=accumulated[-1950:])
+                    except Exception:
+                        pass
+                return
+            accumulated += chunk
+            got_chunk = True
+
+        if query_task.done() and stream_q.empty():
+            return
+
+        if got_chunk and accumulated:
+            now = time.monotonic()
+            if now - last_edit >= _STREAM_EDIT_INTERVAL:
+                try:
+                    preview = accumulated[-1950:] if len(accumulated) > 1950 else accumulated
+                    await msg.edit(content=preview + " ▌")
+                    last_edit = now
+                except Exception:
+                    pass
+
+        await asyncio.sleep(0.05)
+
+
 def _classify_error(e: Exception) -> str:
     """Convert a raw exception into a user-facing error message."""
     msg = str(e).lower()
@@ -320,6 +362,16 @@ async def search_filename_autocomplete(
     return [app_commands.Choice(name=f, value=f) for f in matches[:25]]
 
 
+@client.tree.command(name="forget", description="Clear your /lore conversation history")
+async def forget_slash(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    if user_id in _lore_history:
+        _lore_history.pop(user_id)
+        await interaction.response.send_message("Your conversation history has been cleared.", ephemeral=True)
+    else:
+        await interaction.response.send_message("You have no conversation history to clear.", ephemeral=True)
+
+
 @client.tree.command(name="help", description="Show available bot commands")
 async def help_slash(interaction: discord.Interaction):
     supported = ", ".join(SUPPORTED_EXTENSIONS)
@@ -330,6 +382,7 @@ async def help_slash(interaction: discord.Interaction):
         "`/search <query> [filename]` — Preview raw matching chunks without LLM generation\n"
         "`/status` — Show which documents are currently indexed\n"
         "`/reindex` — Force a re-scan of the input folder\n"
+        "`/forget` — Clear your /lore conversation history\n"
         "`/help` — Show this message\n\n"
         "**Conversational Mode**\n"
         "Mention me or send a DM to have a conversation. I can search your documents automatically.\n\n"
@@ -440,12 +493,16 @@ async def on_message(message: discord.Message):
 
     logger.info(f"Conversational request from {author}: {message_clean}")
 
-    original_message = await message.channel.send(
-        "This may take a few seconds, please wait. This message will be updated with the result!")
+    original_message = await message.channel.send("▌")
+
+    stream_q: queue.Queue = queue.Queue()
+    query_task = asyncio.ensure_future(
+        asyncio.to_thread(ask_stuff, message_clean, author, MessageSource.DISCORD_TEXT, stream_q)
+    )
+    await _stream_to_message(original_message, stream_q, query_task)
 
     try:
-        async with message.channel.typing():
-            original_response = await asyncio.to_thread(ask_stuff, message_clean, author, MessageSource.DISCORD_TEXT)
+        original_response = await query_task
     except Exception as e:
         logger.error(f"Conversation error: {e}")
         original_response = _classify_error(e)
